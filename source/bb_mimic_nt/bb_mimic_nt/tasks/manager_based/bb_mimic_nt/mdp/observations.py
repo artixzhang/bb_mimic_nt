@@ -144,6 +144,11 @@ def reference_object_lin_vel_b(env) -> torch.Tensor:
     return quat_apply_inverse(term.robot.data.root_link_quat_w, term.reference["object_lin_vel"])
 
 
+def future_reference(env, horizons_s: tuple[float, ...]) -> torch.Tensor:
+    """Privileged critic-only future waypoints sampled from the raw cache."""
+    return motion_command(env).sample_future_reference(horizons_s)
+
+
 def reference_contact(env) -> torch.Tensor:
     return motion_command(env).reference["contact"]
 

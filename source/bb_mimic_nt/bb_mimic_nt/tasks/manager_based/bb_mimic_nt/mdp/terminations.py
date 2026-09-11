@@ -68,6 +68,16 @@ def reference_dof_error(env, maximum_rmse: float = 1.0, command_name: str = "mot
     return torch.sqrt(torch.mean(error**2, dim=-1)) > maximum_rmse
 
 
+def object_tracking_error(
+    env, maximum_error: float = 1.0, command_name: str = "motion"
+) -> torch.Tensor:
+    """Terminate an unrecoverable ball trajectory while object tracking is active."""
+    term = _motion(env, command_name)
+    ball_local = term.ball.data.root_pos_w - env.scene.env_origins
+    error = torch.linalg.vector_norm(ball_local - term.reference["object_pos"], dim=-1)
+    return term.object_reward_active & (error > maximum_error)
+
+
 def interaction_tracking_error(env, maximum_distance: float = 0.35, command_name: str = "motion") -> torch.Tensor:
     term = _motion(env, command_name)
     distance = torch.linalg.vector_norm(term.actual_anchor_pos_w() - term.ball.data.root_pos_w[:, None], dim=-1)

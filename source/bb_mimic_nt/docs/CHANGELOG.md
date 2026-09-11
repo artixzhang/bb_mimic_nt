@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.5.0 — 2026-09-11
+
+- 回退所有弹道拟合与 launch-specific 逻辑：Motion cache schema v3 原样保存篮球轨迹，仅使用通用有限差分生成速度；RSI 恢复为全部有效帧均匀采样。
+- 删除 `release_reached` 和 `release_velocity_error_mps` TensorBoard / 评估指标，reference observation 直接使用当前原始球速度。
+- PPO rollout 从 24 增至 48 步，`gamma` / `lambda` 调整为 `0.995` / `0.975`。
+- 为 critic 增加未来 0.25 / 0.50 / 1.00 s 的原始 reference 路点，actor observation 仍保持 473 维；新实验目录为 `g1_shoot_teacher_v3`。
+- 保留 reference-relative residual 平滑、通用 object reward / 1 m termination，以及与 rigid-body API 无关的 hoop Xform。
+
+## v0.4.0 — 2026-09-11
+
+- 将 hoop 从 `RigidObject` 解耦为通用 `AssetBaseCfg` / Xform 场景元素；框架不要求也不自动添加 rigid body 或 collider，并继续支持逐环境篮筐位姿。
+- Motion cache schema 升级为 v2：按每条 clip 的离手后轨迹拟合重力一致的抛物线和独立出手速度，消除第 80 帧中心差分造成的公共错误速度。
+- 出手前 observation 提供 clip-specific launch velocity；object reward 增加线速度分量并提高顶层占比，RSI 仅从可控的离手前帧起步，并记录出手速度误差事件指标。
+- 新增 active object position error 大于 1 m 的 termination。
+- residual-only 低通从 40 ms 加强到 80 ms；reference feed-forward 完全直通，policy residual 单独限制在最高 2 rad/s，并按 demonstrated velocity scale 和 hold 阶段加强平滑正则。
+- PPO 明确声明 policy/critic observation group，消除未来版本兼容警告；修复交互播放第一次按 `V` 未真正隐藏 marker 的状态错误。
+
 ## v0.3.0 — 2026-09-11
 
 - 将整段关节限位的绝对 action 改为 reference-relative residual PD target；policy 输出使用平滑 `tanh` 边界，并只对反馈 residual 使用 40 ms 一阶低通。

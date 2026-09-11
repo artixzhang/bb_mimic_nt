@@ -18,7 +18,7 @@ import joblib
 import numpy as np
 import torch
 
-CACHE_SCHEMA_VERSION = 1
+CACHE_SCHEMA_VERSION = 3
 
 TRACKED_BODY_NAMES = (
     "left_hand",
@@ -406,6 +406,9 @@ def preprocess_motion_batch(
         root_pos = np.asarray(clip["root_pos"], dtype=np.float32)
         root_quat = _normalize_quaternion_sequence(clip["root_rot"])
         dof_pos, contact = reorder_clip_channels(clip)
+        # Preserve the source trajectory exactly. Derived velocities use the
+        # same generic finite-difference rule as every other position signal;
+        # preprocessing never fits, extrapolates, or rewrites ball motion.
         object_pos = np.asarray(clip["obj_pos"], dtype=np.float32)
         object_quat = _normalize_quaternion_sequence(clip["obj_rot"])
         dt = 1.0 / float(clip["fps"])

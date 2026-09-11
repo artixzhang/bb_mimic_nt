@@ -13,6 +13,7 @@ from pathlib import Path
 import torch
 
 import isaaclab.sim as sim_utils
+from isaacsim.core.prims import XFormPrim
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.managers import CommandTerm, CommandTermCfg
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
@@ -61,7 +62,17 @@ class MotionReferenceCommand(CommandTerm):
 
         self.robot: Articulation = env.scene[cfg.robot_name]
         self.ball: RigidObject = env.scene[cfg.ball_name]
-        self.hoop: RigidObject = env.scene[cfg.hoop_name]
+        # InteractiveScene creates its ``extras`` view before cloning and that
+        # view only contains env_0. Recreate the generic Xform view now, after
+        # simulation startup, so indices map to every cloned environment. No
+        # RigidBody API or PhysX state is required by this interface.
+        hoop_prim_path = getattr(env.scene.cfg, cfg.hoop_name).prim_path
+        self.hoop = XFormPrim(hoop_prim_path, name="hoop_scene_view", reset_xform_properties=False)
+        if self.hoop.count != self.num_envs:
+            raise ValueError(
+                f"Expected one hoop Xform per environment, resolved {self.hoop.count} for {self.num_envs} envs."
+            )
+        self._hoop_center_position_w = torch.zeros(self.num_envs, 3, device=self.device)
         self.hoop_center_offset = torch.tensor(cfg.hoop_center_offset, dtype=torch.float, device=self.device)
         self.hoop_root_quat = torch.tensor(cfg.hoop_root_quat, dtype=torch.float, device=self.device)
         self.hoop_root_quat /= torch.linalg.vector_norm(self.hoop_root_quat).clamp_min(1.0e-8)
@@ -107,6 +118,9 @@ class MotionReferenceCommand(CommandTerm):
             torch.any(self._batch["contact"][..., :2] > 0.5, dim=-1)
             & (frame_index < self.lengths[:, None])
         )
+        # This contact-derived boundary is used only to keep free-flight
+        # reference time at 1x. It is not a fitted launch event and no
+        # trajectory values are synthesized from it.
         self.release_frame = torch.where(valid_hand_contact, frame_index, -1).amax(dim=1).float()
         self.clip_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.fixed_clip_ids = torch.full_like(self.clip_ids, -1)
@@ -156,7 +170,10 @@ class MotionReferenceCommand(CommandTerm):
             "control/joint_velocity_rms_radps": torch.zeros(self.num_envs, device=self.device),
             "control/torque_limit_ratio_rms": torch.zeros(self.num_envs, device=self.device),
         }
-        self._time_averaged_metric_names = tuple(name for name in self.metrics if name != "shot_success")
+        self._event_metric_names = ("shot_success",)
+        self._time_averaged_metric_names = tuple(
+            name for name in self.metrics if name not in self._event_metric_names
+        )
         self.last_episode_metrics = {
             name: torch.zeros(self.num_envs, device=self.device) for name in self.metrics
         }
@@ -185,14 +202,52 @@ class MotionReferenceCommand(CommandTerm):
     def in_active_motion(self) -> torch.Tensor:
         return self.stage == STAGE_ACTIVE
 
-    def _sample(self, field: str, quaternion: bool = False) -> torch.Tensor:
+    def _sample(
+        self,
+        field: str,
+        quaternion: bool = False,
+        frame: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         return interpolate_motion(
             self._batch[field],
             self.clip_ids,
-            self.frame,
+            self.frame if frame is None else frame,
             self.lengths,
             quaternion=quaternion,
         )
+
+    def sample_future_reference(self, horizons_s: Sequence[float]) -> torch.Tensor:
+        """Return generic future reference waypoints for the privileged critic.
+
+        Horizons are measured in source-trajectory time, not policy wall time.
+        This exposes no fitted launch target and does not affect the actor or
+        reference controller. Each waypoint contains root position, joint
+        position, root-local tracked-link position, object position/velocity,
+        binary contact state, and normalized phase.
+        """
+        if not horizons_s or any(float(horizon) <= 0.0 for horizon in horizons_s):
+            raise ValueError("Future-reference horizons must be positive.")
+        last = (self.lengths[self.clip_ids] - 1).float()
+        waypoints = []
+        for horizon_s in horizons_s:
+            future_frame = torch.minimum(self.frame + float(horizon_s) * self.fps, last)
+            contact = (self._sample("contact", frame=future_frame) >= 0.5).float()
+            future_phase = (future_frame / last.clamp_min(1.0)).unsqueeze(-1)
+            waypoints.append(
+                torch.cat(
+                    (
+                        self._sample("root_pos", frame=future_frame),
+                        self._sample("dof_pos", frame=future_frame),
+                        self._sample("link_pos_b", frame=future_frame).flatten(1),
+                        self._sample("object_pos", frame=future_frame),
+                        self._sample("object_lin_vel", frame=future_frame),
+                        contact,
+                        future_phase,
+                    ),
+                    dim=-1,
+                )
+            )
+        return torch.cat(waypoints, dim=-1)
 
     def _refresh_reference(self) -> None:
         quaternion_fields = {"root_quat", "object_quat", "link_quat_w", "link_quat_b"}
@@ -256,16 +311,22 @@ class MotionReferenceCommand(CommandTerm):
         self.ball.write_root_velocity_to_sim(ball_velocity, env_ids=env_ids)
         hoop_quat = self.hoop_root_quat.expand(len(env_ids), -1)
         hoop_offset = self.hoop_center_offset.expand(len(env_ids), -1)
-        hoop_root_pos = (
-            self.reference["hoop_pos"][env_ids]
-            + origin
-            - quat_apply(hoop_quat, hoop_offset)
+        hoop_root_pos_local = self.reference["hoop_pos"][env_ids] - quat_apply(hoop_quat, hoop_offset)
+        # The Xform is parented below each environment, so local pose avoids
+        # any dependency on rigid-body buffers and naturally uses env origins.
+        self.hoop.set_local_poses(
+            translations=hoop_root_pos_local,
+            orientations=hoop_quat,
+            indices=env_ids,
         )
-        hoop_pose = torch.cat((hoop_root_pos, hoop_quat), dim=-1)
-        self.hoop.write_root_pose_to_sim(hoop_pose, env_ids=env_ids)
+        self._hoop_center_position_w[env_ids] = self.reference["hoop_pos"][env_ids] + origin
         if not self._hoop_pose_validated:
             expected_center = self.reference["hoop_pos"][env_ids] + origin
-            center_error = torch.linalg.vector_norm(self.hoop_center_pos_w()[env_ids] - expected_center, dim=-1)
+            root_pos, root_quat = self.hoop.get_world_poses(indices=env_ids)
+            root_pos = torch.as_tensor(root_pos, dtype=torch.float, device=self.device)
+            root_quat = torch.as_tensor(root_quat, dtype=torch.float, device=self.device)
+            actual_center = root_pos + quat_apply(root_quat, hoop_offset)
+            center_error = torch.linalg.vector_norm(actual_center - expected_center, dim=-1)
             if torch.any(center_error > 1.0e-4):
                 raise RuntimeError(
                     "Floating hoop center transform is inconsistent with hoop_pos_w; "
@@ -281,7 +342,8 @@ class MotionReferenceCommand(CommandTerm):
         duration = (self._env.episode_length_buf[env_ids].float() * self._env.step_dt).clamp_min(
             self._env.step_dt
         )
-        self.last_episode_metrics["shot_success"][env_ids] = self.metrics["shot_success"][env_ids]
+        for name in self._event_metric_names:
+            self.last_episode_metrics[name][env_ids] = self.metrics[name][env_ids]
         for name in self._time_averaged_metric_names:
             self.last_episode_metrics[name][env_ids] = self.metrics[name][env_ids] / duration
         self.last_episode_clip_ids[env_ids] = self.clip_ids[env_ids]
@@ -306,6 +368,8 @@ class MotionReferenceCommand(CommandTerm):
         ) if self.cfg.enable_rsi else 0.0
         use_rsi = torch.rand(len(env_ids), device=self.device) < probability
         valid_frame_count = self.lengths[self.clip_ids[env_ids]].clamp_min(1)
+        # RSI is uniform over every valid source frame. It does not encode any
+        # task-specific event or restrict sampling to a hand-authored phase.
         random_frames = torch.floor(torch.rand(len(env_ids), device=self.device) * valid_frame_count).float()
         self.frame[env_ids] = torch.where(use_rsi, random_frames, torch.zeros_like(random_frames))
         self.stage[env_ids] = torch.where(
@@ -371,9 +435,8 @@ class MotionReferenceCommand(CommandTerm):
         return body_pos + quat_apply(body_quat.reshape(-1, 4), offsets.reshape(-1, 3)).reshape_as(body_pos)
 
     def hoop_center_pos_w(self) -> torch.Tensor:
-        """Return the physical rim center rather than the floating asset root."""
-        offset = self.hoop_center_offset.expand(self.num_envs, -1)
-        return self.hoop.data.root_pos_w + quat_apply(self.hoop.data.root_quat_w, offset)
+        """Return the commanded rim center, independent of hoop asset physics."""
+        return self._hoop_center_position_w
 
     def _tracking_error(self) -> torch.Tensor:
         root_local = self.robot.data.root_link_pos_w - self._env.scene.env_origins

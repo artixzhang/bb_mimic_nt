@@ -78,28 +78,40 @@ def contact_graph_reward(
 
 @configclass
 class UnifiedRewardCfg:
-    global_weights: tuple[float, float, float, float] = (0.45, 0.25, 0.20, 0.10)
+    # Top-level order: (body, object, hand-object relative, contact).
+    global_weights: tuple[float, float, float, float] = (0.40, 0.30, 0.20, 0.10)
+    # Body order: (root, joints, tracked links).
     body_weights: tuple[float, float, float] = (0.30, 0.40, 0.30)
+    # Root order: (position, rotation, linear velocity, angular velocity).
     root_weights: tuple[float, float, float, float] = (0.35, 0.25, 0.20, 0.20)
+    # Joint order: (position, velocity).
     joint_weights: tuple[float, float] = (0.70, 0.30)
+    # Link order: (root-local position, root-local rotation).
     link_weights: tuple[float, float] = (0.70, 0.30)
-    object_weights: tuple[float, float] = (1.0, 0.0)
+    # Object order: (position, linear velocity, rotation). Velocity is the
+    # generic first derivative of the unmodified source object trajectory.
+    object_weights: tuple[float, float, float] = (0.65, 0.35, 0.0)
+    # Relative order: (hand-anchor position, rotation placeholder).
     relative_weights: tuple[float, float] = (1.0, 0.0)
+    # Sensitivity order follows the corresponding component weight above.
     root_sigmas: tuple[float, float, float, float] = (20.0, 5.0, 2.0, 0.5)
     joint_sigmas: tuple[float, float] = (4.0, 0.1)
     link_sigmas: tuple[float, float] = (40.0, 5.0)
-    object_sigmas: tuple[float, float] = (20.0, 1.0)
+    object_sigmas: tuple[float, float, float] = (20.0, 0.5, 1.0)
     relative_sigmas: tuple[float, float] = (40.0, 1.0)
     hand_contact_sensitivity: float = 2.0
     foot_contact_sensitivity: float = 1.0
     hand_contact_force: float = 1.0
     foot_contact_force: float = 5.0
-    action_magnitude_weight: float = 0.005
+    # Regularization acts on normalized residual control, not on the
+    # demonstrated feed-forward reference motion.
+    action_magnitude_weight: float = 0.020
     action_rate_weight: float = 0.05
-    target_residual_rate_weight: float = 0.05
+    target_residual_rate_weight: float = 0.50
     torque_weight: float = 0.005
     limit_weight: float = 0.05
     joint_velocity_error_weight: float = 0.02
+    hold_regularization_multiplier: float = 2.0
     regularization_clip: float = 0.35
     termination_penalty: float = 5.0
 
@@ -115,6 +127,12 @@ def regularization_cost(term: MotionReferenceCommand, settings: UnifiedRewardCfg
         action_term.previous_processed_actions - action_term.previous_reference_positions
     ) / action_term.residual_scale
     target_residual_rate = torch.mean((current_residual - previous_residual) ** 2, dim=-1)
+    hold_multiplier = torch.where(
+        term.in_active_motion,
+        torch.ones(term.num_envs, device=term.device),
+        torch.full((term.num_envs,), settings.hold_regularization_multiplier, device=term.device),
+    )
+    target_residual_rate *= hold_multiplier
 
     torque = robot.data.applied_torque[:, joint_ids]
     effort_limit = robot.data.joint_effort_limits[:, joint_ids].clamp_min(1.0e-6)
@@ -128,10 +146,12 @@ def regularization_cost(term: MotionReferenceCommand, settings: UnifiedRewardCfg
     limit_cost = torch.mean((torch.relu(normalized_pos - 0.9) / 0.1) ** 2, dim=-1)
 
     joint_vel = robot.data.joint_vel[:, joint_ids]
-    velocity_limit = robot.data.joint_vel_limits[:, joint_ids].clamp_min(1.0e-6)
+    # Hardware velocity limits are far too large to characterize visible
+    # jitter. Normalize by the demonstrated per-joint motion scale instead.
+    velocity_scale = term.maximum_reference_dof_speed.clamp_min(2.0)
     joint_velocity_error = torch.mean(
-        ((joint_vel - term.reference["dof_vel"]) / velocity_limit) ** 2, dim=-1
-    )
+        ((joint_vel - term.reference["dof_vel"]) / velocity_scale) ** 2, dim=-1
+    ) * hold_multiplier
     weighted = clipped_regularization(
         (
             action_magnitude,
@@ -243,8 +263,11 @@ class UnifiedMimicReward(ManagerTermBase):
             "mimic/object/position": object_position_reward(
                 term.ball.data.root_pos_w - origin, reference["object_pos"], settings.object_sigmas[0]
             ),
+            "mimic/object/linear_velocity": root_velocity_reward(
+                term.ball.data.root_lin_vel_w, reference["object_lin_vel"], settings.object_sigmas[1]
+            ),
             "mimic/object/rotation": object_rotation_reward(
-                term.ball.data.root_quat_w, reference["object_quat"], settings.object_sigmas[1]
+                term.ball.data.root_quat_w, reference["object_quat"], settings.object_sigmas[2]
             ),
         }
         obj = normalized_weighted_sum(tuple(object_parts.values()), settings.object_weights)

@@ -1,7 +1,7 @@
 # Copyright (c) 2022-2025, The Isaac Lab Project Developers.
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""MotionBatchV1 validation, kinematics, interpolation inputs, and cache tests."""
+"""Motion-batch validation, kinematics, interpolation inputs, and cache tests."""
 
 from __future__ import annotations
 
@@ -48,10 +48,16 @@ def test_real_batch_validation_contact_reordering_padding_and_hashes() -> None:
     assert tuple(cache["metadata"]["contact_names"]) == CONTACT_NAMES
     assert cache_is_current(CACHE, SOURCE, URDF)
     assert cache["anchor_pos_b"].shape[-2:] == (2, 3)
+    assert "object_launch_vel" not in cache
+    assert "object_release_frame" not in cache
+    assert "ballistic_fit_rmse" not in cache
 
     length = int(cache["lengths"][0])
     source_indices = [tuple(raw[0]["contact_names"]).index(name) for name in CONTACT_NAMES]
     assert np.array_equal(cache["contact"][0, :length].numpy(), np.asarray(raw[0]["contact"])[:, source_indices])
+    assert np.array_equal(cache["object_pos"][0, :length].numpy(), np.asarray(raw[0]["obj_pos"], dtype=np.float32))
+    expected_object_velocity = finite_difference(np.asarray(raw[0]["obj_pos"]), 0.01)
+    assert np.array_equal(cache["object_lin_vel"][0, :length].numpy(), expected_object_velocity)
     assert torch.all(cache["valid"][0, :length])
     assert not torch.any(cache["valid"][0, length:])
     if length < cache["valid"].shape[1]:

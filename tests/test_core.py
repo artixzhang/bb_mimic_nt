@@ -12,7 +12,7 @@ import torch
 
 from bb_mimic_nt.core import (
     advance_reference_frame,
-    apply_ballistic_speed_lock,
+    apply_free_flight_speed_lock,
     clipped_regularization,
     downward_hoop_crossing,
     gated_top_level_reward,
@@ -26,7 +26,16 @@ from bb_mimic_nt.core import (
     select_adaptive_speed,
     slerp_wxyz,
 )
-from bb_mimic_nt.training import PPO_MAX_ITERATIONS, PPO_STEPS_PER_ENV, RSI_DECAY_STEPS, TEACHER_OBSERVATION_DIM
+from bb_mimic_nt.training import (
+    CRITIC_FUTURE_HORIZONS_S,
+    CRITIC_FUTURE_OBSERVATION_DIM,
+    PPO_GAMMA,
+    PPO_LAMBDA,
+    PPO_MAX_ITERATIONS,
+    PPO_STEPS_PER_ENV,
+    RSI_DECAY_STEPS,
+    TEACHER_OBSERVATION_DIM,
+)
 
 
 def test_reference_residual_action_and_target_rate_limit() -> None:
@@ -53,6 +62,9 @@ def test_reference_residual_action_and_target_rate_limit() -> None:
 
 
 def test_rsi_schedule_uses_central_training_length() -> None:
+    assert PPO_STEPS_PER_ENV == 48
+    assert PPO_GAMMA == pytest.approx(0.995)
+    assert PPO_LAMBDA == pytest.approx(0.975)
     assert RSI_DECAY_STEPS == int(PPO_STEPS_PER_ENV * PPO_MAX_ITERATIONS * 0.30)
     assert rsi_probability(0, RSI_DECAY_STEPS) == pytest.approx(0.8)
     assert rsi_probability(RSI_DECAY_STEPS // 2, RSI_DECAY_STEPS) == pytest.approx(0.4)
@@ -66,13 +78,15 @@ def test_teacher_observation_contract_is_473() -> None:
     history = 3 * (3 + 29 + 29)
     assert (current, reference, history) == (151, 137, 183)
     assert current + reference + history + 2 == TEACHER_OBSERVATION_DIM
+    assert CRITIC_FUTURE_HORIZONS_S == (0.25, 0.50, 1.00)
+    assert CRITIC_FUTURE_OBSERVATION_DIM == 3 * (3 + 29 + 12 + 3 + 3 + 4 + 1)
 
 
 def test_adaptive_speed_levels_are_monotonic() -> None:
     errors = torch.tensor([0.0, 0.3, 0.8, 1.2])
     speed = select_adaptive_speed(errors, (0.5, 0.75, 1.0, 1.25))
     assert torch.equal(speed, torch.tensor([1.25, 1.0, 0.75, 0.5]))
-    locked = apply_ballistic_speed_lock(
+    locked = apply_free_flight_speed_lock(
         speed, torch.tensor([79.0, 80.0, 81.0, 120.0]), torch.full((4,), 80.0)
     )
     assert torch.equal(locked, torch.tensor([1.25, 1.0, 1.0, 1.0]))

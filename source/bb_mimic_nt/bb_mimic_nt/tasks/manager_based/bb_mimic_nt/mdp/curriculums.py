@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from bb_mimic_nt.training import TEACHER_OBSERVATION_DIM
+from bb_mimic_nt.training import CRITIC_FUTURE_OBSERVATION_DIM, TEACHER_OBSERVATION_DIM
 
 from .commands import MotionReferenceCommand, rsi_probability
 from .contacts import CONTACT_SENSOR_NAMES
@@ -21,6 +21,12 @@ def rsi_curriculum(env, env_ids, command_name: str = "motion") -> dict[str, floa
         if observation_shape != (TEACHER_OBSERVATION_DIM,):
             raise ValueError(
                 f"Expected policy observation shape ({TEACHER_OBSERVATION_DIM},), got {observation_shape}."
+            )
+        critic_future_shape = env.observation_manager.group_obs_dim["critic_future"]
+        if critic_future_shape != (CRITIC_FUTURE_OBSERVATION_DIM,):
+            raise ValueError(
+                "Expected critic future observation shape "
+                f"({CRITIC_FUTURE_OBSERVATION_DIM},), got {critic_future_shape}."
             )
         missing_sensors = set(CONTACT_SENSOR_NAMES).difference(env.scene.keys())
         if missing_sensors:

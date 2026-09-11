@@ -20,7 +20,7 @@ DEFAULT_URDF = PROJECT_ROOT / "source/bb_mimic_nt/assets/robots/g1/urdf/unitree_
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT, help="Raw joblib motion batch.")
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="Output MotionBatchV1 torch cache.")
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="Output motion-batch torch cache.")
     parser.add_argument("--urdf", type=Path, default=DEFAULT_URDF, help="URDF used for forward kinematics.")
     parser.add_argument("--force", action="store_true", help="Rebuild even when the cache hash is current.")
     args = parser.parse_args()
