@@ -1,18 +1,18 @@
 [package]
 
 # Semantic Versioning is used: https://semver.org/
-version = "0.1.0"
+version = "0.3.0"
 
 # Description
 category = "isaaclab"
 readme  = "README.md"
 
-title = "Extension Template"
-author = "Isaac Lab Project Developers"
-maintainer = "Isaac Lab Project Developers"
-description="Extension Template for Isaac Lab"
-repository = "https://github.com/isaac-sim/IsaacLab.git"
-keywords = ["extension", "template", "isaaclab"]
+title = "BB Mimic NT"
+author = "BB Mimic NT Contributors"
+maintainer = "BB Mimic NT Contributors"
+description = "Unitree G1 jump-shot imitation learning Teacher policy for Isaac Lab"
+repository = ""
+keywords = ["isaaclab", "unitree-g1", "basketball", "imitation-learning", "ppo"]
 
 [dependencies]
 "isaaclab" = {}
@@ -20,7 +20,6 @@ keywords = ["extension", "template", "isaaclab"]
 "isaaclab_mimic" = {}
 "isaaclab_rl" = {}
 "isaaclab_tasks" = {}
-# NOTE: Add additional dependencies here
 
 [[python.module]]
 name = "bb_mimic_nt"

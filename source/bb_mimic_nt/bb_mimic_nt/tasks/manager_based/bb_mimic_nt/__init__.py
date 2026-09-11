@@ -13,11 +13,21 @@ from . import agents
 
 
 gym.register(
-    id="Template-Bb-Mimic-Nt-v0",
+    id="BbMimicNT-G1-Shoot-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": f"{__name__}.bb_mimic_nt_env_cfg:BbMimicNtEnvCfg",
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PPORunnerCfg",
+        "env_cfg_entry_point": f"{__name__}.bb_mimic_nt_env_cfg:G1ShootEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1ShootPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="BbMimicNT-G1-Shoot-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.bb_mimic_nt_env_cfg:G1ShootPlayEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1ShootPPORunnerCfg",
     },
 )

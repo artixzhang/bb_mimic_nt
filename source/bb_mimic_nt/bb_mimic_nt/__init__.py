@@ -3,12 +3,28 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""
-Python module serving as a project/extension template.
+"""Unitree G1 basketball imitation learning package.
+
+Task registration is intentionally kept in :mod:`bb_mimic_nt.tasks`.  Keeping
+the top-level package light makes the trajectory tools usable without starting
+Isaac Sim first.
 """
 
-# Register Gym environments.
-from .tasks import *
+__version__ = "0.2.0"
 
-# Register UI extensions.
-from .ui_extension_example import *
+
+def register_tasks():
+    """Import task registrations after Isaac Sim has initialized."""
+    from . import tasks
+
+    return tasks
+
+
+# Omniverse imports the extension module after Kit initialization. Keep normal
+# Python imports lightweight so offline trajectory tooling remains CPU-only.
+try:
+    import omni  # noqa: F401
+except ModuleNotFoundError:
+    pass
+else:
+    register_tasks()
