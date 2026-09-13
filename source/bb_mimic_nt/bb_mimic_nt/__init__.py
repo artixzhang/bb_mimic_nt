@@ -10,7 +10,7 @@ the top-level package light makes the trajectory tools usable without starting
 Isaac Sim first.
 """
 
-__version__ = "0.5.0"
+__version__ = "0.2.0"
 
 
 def register_tasks():

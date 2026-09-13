@@ -105,7 +105,7 @@ def select_adaptive_speed(error: torch.Tensor, choices: tuple[float, ...]) -> to
     )
 
 
-def apply_free_flight_speed_lock(
+def apply_ballistic_speed_lock(
     selected_speed: torch.Tensor, frame: torch.Tensor, last_hand_contact_frame: torch.Tensor
 ) -> torch.Tensor:
     """Lock reference time to 1x after both reference hands have released."""
@@ -124,7 +124,7 @@ def advance_reference_frame(
     If a policy interval straddles the release instant, the interval portion
     before release uses the adaptive speed and the remaining portion uses 1x.
     """
-    speed = apply_free_flight_speed_lock(selected_speed, frame, last_hand_contact_frame)
+    speed = apply_ballistic_speed_lock(selected_speed, frame, last_hand_contact_frame)
     proposed = frame + speed * frame_rate * dt
     crosses_release = (frame <= last_hand_contact_frame) & (proposed > last_hand_contact_frame)
     safe_rate = (speed * frame_rate).clamp_min(1.0e-8)

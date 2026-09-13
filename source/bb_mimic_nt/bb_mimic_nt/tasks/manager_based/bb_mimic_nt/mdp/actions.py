@@ -36,11 +36,8 @@ class ReferenceResidualJointPositionAction(ActionTerm):
             raise ValueError("Residual scale bounds must be positive and ordered.")
         if not 0.0 < cfg.mechanical_velocity_limit_fraction <= 1.0:
             raise ValueError("mechanical_velocity_limit_fraction must be in (0, 1].")
-        if (
-            cfg.minimum_residual_velocity <= 0.0
-            or cfg.maximum_residual_velocity < cfg.minimum_residual_velocity
-        ):
-            raise ValueError("Residual velocity bounds must be positive and ordered.")
+        if cfg.reference_velocity_headroom < 1.0 or cfg.minimum_target_velocity <= 0.0:
+            raise ValueError("Reference velocity headroom and minimum target velocity are invalid.")
         if cfg.position_limit_margin < 0.0:
             raise ValueError("position_limit_margin must be non-negative.")
         if cfg.residual_filter_time_constant_s < 0.0:
@@ -94,15 +91,12 @@ class ReferenceResidualJointPositionAction(ActionTerm):
             self._asset.data.joint_vel_limits[:, self._joint_ids].clamp_min(1.0e-6)
             * cfg.mechanical_velocity_limit_fraction
         )
-        # Reserve the demonstrated peak speed for reference feed-forward. The
-        # policy residual receives only the remaining actuator speed budget,
-        # capped at a deliberately modest feedback rate.
-        available_residual_velocity = (
-            mechanical_target_velocity - self._command.maximum_reference_dof_speed[None]
-        ).clamp_min(cfg.minimum_residual_velocity)
-        self._residual_velocity_limit = torch.minimum(
-            available_residual_velocity,
-            torch.full_like(available_residual_velocity, cfg.maximum_residual_velocity),
+        reference_target_velocity = (
+            self._command.maximum_reference_dof_speed * cfg.reference_velocity_headroom
+        ).clamp_min(cfg.minimum_target_velocity)
+        self._target_velocity_limit = torch.minimum(
+            mechanical_target_velocity,
+            reference_target_velocity[None].expand_as(mechanical_target_velocity),
         )
         self.synchronize_reference()
 
@@ -176,17 +170,11 @@ class ReferenceResidualJointPositionAction(ActionTerm):
             self._lower,
             self._upper,
         )
-        desired_residual = self._desired_actions - self._reference_positions
-        previous_residual = self._previous_processed_actions - self._previous_reference_positions
-        limited_residual = rate_limit_target(
-            desired_residual,
-            previous_residual,
-            self._residual_velocity_limit,
+        self._processed_actions[:] = rate_limit_target(
+            self._desired_actions,
+            self._previous_processed_actions,
+            self._target_velocity_limit,
             self._env.step_dt,
-        )
-        self._processed_actions[:] = torch.maximum(
-            torch.minimum(self._reference_positions + limited_residual, self._upper),
-            self._lower,
         )
 
     def apply_actions(self) -> None:
@@ -225,7 +213,7 @@ class ReferenceResidualJointPositionActionCfg(ActionTermCfg):
     minimum_residual_scale: float = 0.10
     maximum_residual_scale: float = 0.50
     mechanical_velocity_limit_fraction: float = 0.90
-    minimum_residual_velocity: float = 0.50
-    maximum_residual_velocity: float = 2.0
+    reference_velocity_headroom: float = 1.50
+    minimum_target_velocity: float = 4.0
     position_limit_margin: float = 0.020
-    residual_filter_time_constant_s: float = 0.080
+    residual_filter_time_constant_s: float = 0.040

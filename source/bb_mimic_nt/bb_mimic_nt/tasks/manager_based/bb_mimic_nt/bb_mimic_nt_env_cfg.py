@@ -28,7 +28,7 @@ from bb_mimic_nt.objects import (
     BB_HOOP_ROOT_ROTATION,
 )
 from bb_mimic_nt.robots.unitree_g1_bb import G1_BB_CFG, G1Constants
-from bb_mimic_nt.training import CRITIC_FUTURE_HORIZONS_S, RSI_DECAY_STEPS
+from bb_mimic_nt.training import RSI_DECAY_STEPS
 
 from . import mdp
 
@@ -38,8 +38,6 @@ ASSET_ROOT = EXTENSION_ROOT / "assets"
 MOTION_SOURCE = ASSET_ROOT / "trajectory" / "shoot_batch_0910.pkl"
 MOTION_CACHE = ASSET_ROOT / "trajectory" / "shoot_batch_0910_processed.pt"
 ROBOT_URDF = ASSET_ROOT / "robots" / "g1" / "urdf" / "unitree_g1_bb.urdf"
-
-
 @configclass
 class G1ShootSceneCfg(InteractiveSceneCfg):
     """G1, dynamic basketball, kinematic hoop, and filtered contacts."""
@@ -47,10 +45,7 @@ class G1ShootSceneCfg(InteractiveSceneCfg):
     ground = BB_BLANK_PLANE_CFG
     robot: ArticulationCfg = G1_BB_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
     ball: RigidObjectCfg = BB_BALL_CFG
-    # A visual/scenery Xform, deliberately not a RigidObject. The referenced
-    # USD may contain no physics APIs, authored static colliders, or its own
-    # rigid-body APIs without changing the task-side interface.
-    hoop: AssetBaseCfg = BB_HOOP_FLOATING_CFG
+    hoop: RigidObjectCfg = BB_HOOP_FLOATING_CFG
 
     left_hand_ball_contact = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/left_hand/left_hand",
@@ -102,7 +97,7 @@ class ActionsCfg:
 
 @configclass
 class ObservationsCfg:
-    """473 actor scalars plus critic-only future reference waypoints."""
+    """The concatenated Teacher observation has exactly 473 scalars."""
 
     @configclass
     class PolicyCfg(ObsGroup):
@@ -150,21 +145,6 @@ class ObservationsCfg:
 
     policy: PolicyCfg = PolicyCfg()
 
-    @configclass
-    class CriticFutureCfg(ObsGroup):
-        # Three raw reference waypoints, 55 scalars each. These are privileged
-        # value-function inputs only and never enter the policy network.
-        future_reference = ObsTerm(
-            func=mdp.future_reference,
-            params={"horizons_s": CRITIC_FUTURE_HORIZONS_S},
-        )
-
-        def __post_init__(self) -> None:
-            self.enable_corruption = False
-            self.concatenate_terms = True
-
-    critic_future: CriticFutureCfg = CriticFutureCfg()
-
 
 @configclass
 class RewardsCfg:
@@ -190,10 +170,6 @@ class TerminationsCfg:
     non_finite_state = DoneTerm(func=mdp.non_finite_state)
     root_tracking_error = DoneTerm(func=mdp.root_tracking_error, params={"maximum_error": 0.75})
     dof_tracking_error = DoneTerm(func=mdp.reference_dof_error, params={"maximum_rmse": 1.0})
-    object_tracking_error = DoneTerm(
-        func=mdp.object_tracking_error,
-        params={"maximum_error": 1.0},
-    )
     interaction_tracking_error = DoneTerm(
         func=mdp.interaction_tracking_error,
         params={"maximum_distance": 0.35},
@@ -233,9 +209,8 @@ class G1ShootEnvCfg(ManagerBasedRLEnvCfg):
         self.viewer.lookat = (1.0, 0.0, 1.5)
         self.sim.dt = 1.0 / 500.0
         self.sim.render_interval = self.decimation
-        # GPU PhysX does not support CCD and otherwise emits a warning while
-        # silently ignoring it. The 500 Hz physics rate is the task's
-        # tunnelling mitigation; collision behavior remains authored by USD.
+        # Isaac Sim exposes CCD at scene level; this protects the fast ball.
+        self.sim.physx.enable_ccd = True
         self.sim.physx.bounce_threshold_velocity = 0.2
 
 

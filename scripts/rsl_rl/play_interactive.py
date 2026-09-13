@@ -96,7 +96,6 @@ def main(env_cfg, agent_cfg):
         env_cfg.terminations.non_finite_state = None
         env_cfg.terminations.root_tracking_error = None
         env_cfg.terminations.dof_tracking_error = None
-        env_cfg.terminations.object_tracking_error = None
         env_cfg.terminations.interaction_tracking_error = None
 
     gym_env = gym.make(args_cli.task, cfg=env_cfg)

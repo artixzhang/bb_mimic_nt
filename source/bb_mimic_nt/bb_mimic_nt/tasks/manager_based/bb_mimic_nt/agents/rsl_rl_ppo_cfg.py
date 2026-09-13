@@ -3,18 +3,17 @@
 from isaaclab.utils import configclass
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
 
-from bb_mimic_nt.training import PPO_GAMMA, PPO_LAMBDA, PPO_MAX_ITERATIONS, PPO_STEPS_PER_ENV
+from bb_mimic_nt.training import PPO_MAX_ITERATIONS, PPO_STEPS_PER_ENV
 
 
 @configclass
 class G1ShootPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = PPO_STEPS_PER_ENV
-    obs_groups = {"policy": ["policy"], "critic": ["policy", "critic_future"]}
     max_iterations = PPO_MAX_ITERATIONS
     save_interval = 100
-    # The critic observation changed in v3; keep incompatible v2 checkpoints
-    # out of automatic discovery.
-    experiment_name = "g1_shoot_teacher_v3"
+    # Action semantics and observations changed in v2; keep incompatible v1
+    # checkpoints out of automatic discovery.
+    experiment_name = "g1_shoot_teacher_v2"
     empirical_normalization = False
     # The action term applies a smooth tanh bound.  Do not hard-clip Gaussian
     # samples in the vector wrapper before they reach that transform.
@@ -36,10 +35,8 @@ class G1ShootPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         num_mini_batches=4,
         learning_rate=3.0e-4,
         schedule="adaptive",
-        # At 100 Hz, these retain useful delayed credit across the 0.48 s
-        # rollout while avoiding an excessively long rollout batch.
-        gamma=PPO_GAMMA,
-        lam=PPO_LAMBDA,
+        gamma=0.99,
+        lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,
     )
