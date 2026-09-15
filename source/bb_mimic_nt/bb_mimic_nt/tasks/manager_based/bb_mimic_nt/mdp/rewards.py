@@ -100,8 +100,8 @@ class UnifiedRewardCfg:
     torque_weight: float = 0.005
     limit_weight: float = 0.05
     joint_velocity_error_weight: float = 0.02
-    regularization_clip: float = 0.35
-    termination_penalty: float = 5.0
+    regularization_clip: float = 1.0
+    termination_penalty: float = 50.0
 
 
 def regularization_cost(term: MotionReferenceCommand, settings: UnifiedRewardCfg, env) -> dict[str, torch.Tensor]:

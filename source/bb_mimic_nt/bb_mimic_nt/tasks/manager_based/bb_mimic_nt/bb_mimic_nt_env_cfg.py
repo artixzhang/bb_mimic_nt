@@ -200,14 +200,14 @@ class G1ShootEnvCfg(ManagerBasedRLEnvCfg):
     events: EventsCfg = EventsCfg()
 
     def __post_init__(self) -> None:
-        self.decimation = 5
+        self.decimation = 2
         # Long enough for the longest clip at 0.5x plus both holds. The motion
         # command remains the authoritative timeout condition.
         self.episode_length_s = 7.0
         self.is_finite_horizon = False
         self.viewer.eye = (7.0, 6.0, 4.0)
         self.viewer.lookat = (1.0, 0.0, 1.5)
-        self.sim.dt = 1.0 / 500.0
+        self.sim.dt = 1.0 / 200.0
         self.sim.render_interval = self.decimation
         # Isaac Sim exposes CCD at scene level; this protects the fast ball.
         self.sim.physx.enable_ccd = True

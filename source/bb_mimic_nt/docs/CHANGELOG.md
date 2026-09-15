@@ -25,3 +25,18 @@
 - 交互 marker 增加篮球参考点并逐策略帧显式刷新；默认保留训练用失败 termination，另提供 `--ignore-failures` 完整检查 reference。
 - 修复 reset 时向 kinematic 篮筐写入线速度和角速度导致的 PhysX 报错。
 - TensorBoard 增加 root、DoF、link、篮球、手球相对位置和 contact 的原始 tracking error，以及 action/PD target/关节速度/力矩抖动诊断指标。
+
+## 26-09-15_23-00
+
+- `rsl_rl_ppo_cfg.py` 降低噪声探索奖励
+    - init_noise_std: 0.8 -> 0.4
+    - entropy_coef: 0.005 -> 0.0001
+- `rewards.py` 加大死亡惩罚, 加大正则化, 压低噪声
+    - regularization_clip: 0.35 -> 1.0
+    - termination_penalty: 5.0 -> 50.0
+- `bb_mimic_nt_env_cfg.py` 提升仿真速度
+    - self.decimation: 5 -> 2
+    - self.sim.dt: 1.0/500.0 -> 1.0/200.0
+- `actions.py` 提升residual权限, 加大residual作用范围
+    - residual_scale_fraction: 0.20 -> 0.50
+    - maximum_residual_scale: 0.50 -> 0.80

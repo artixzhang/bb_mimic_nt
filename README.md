@@ -6,7 +6,7 @@
 
 - 训练环境：`BbMimicNT-G1-Shoot-v0`
 - 确定性播放环境：`BbMimicNT-G1-Shoot-Play-v0`
-- 仿真 / 策略频率：500 Hz / 100 Hz（decimation 5）
+- 仿真 / 策略频率：200 Hz / 100 Hz（decimation 2）
 - 动作：29 维 reference-relative PD residual；Gaussian policy 输出经 `tanh` 平滑约束，反馈 residual 使用 40 ms 一阶低通，目标限制在机械关节限位内，并按 reference/执行器速度上限限制每步变化；reference pose 本身不经过低通
 - Teacher observation：固定 473 维，包含当前状态、reference pose/velocity/contact、历史、phase 与 reference speed
 - 原始轨迹：`source/bb_mimic_nt/assets/trajectory/shoot_batch_0910.pkl`
@@ -106,5 +106,3 @@ python scripts/rsl_rl/evaluate_shooting.py \
 ```bash
 PYTHONPATH=source/bb_mimic_nt pytest -q tests
 ```
-
-Isaac Sim 场景与两次 PPO iteration 冒烟需要可工作的 NVIDIA 驱动。

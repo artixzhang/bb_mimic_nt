@@ -209,9 +209,9 @@ class ReferenceResidualJointPositionActionCfg(ActionTermCfg):
     class_type: type[ActionTerm] = ReferenceResidualJointPositionAction
     joint_names: list[str] = []
     command_name: str = "motion"
-    residual_scale_fraction: float = 0.25
+    residual_scale_fraction: float = 0.50
     minimum_residual_scale: float = 0.10
-    maximum_residual_scale: float = 0.50
+    maximum_residual_scale: float = 0.80
     mechanical_velocity_limit_fraction: float = 0.90
     reference_velocity_headroom: float = 1.50
     minimum_target_velocity: float = 4.0

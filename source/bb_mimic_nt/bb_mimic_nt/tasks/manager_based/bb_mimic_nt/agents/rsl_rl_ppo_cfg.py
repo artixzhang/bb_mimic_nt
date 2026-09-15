@@ -19,7 +19,7 @@ class G1ShootPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     # samples in the vector wrapper before they reach that transform.
     clip_actions = None
     policy = RslRlPpoActorCriticCfg(
-        init_noise_std=0.8,
+        init_noise_std=0.4,
         actor_obs_normalization=True,
         critic_obs_normalization=True,
         actor_hidden_dims=[1024, 512, 256],
@@ -30,7 +30,7 @@ class G1ShootPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.005,
+        entropy_coef=0.0001,
         num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=3.0e-4,
