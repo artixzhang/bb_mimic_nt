@@ -40,3 +40,14 @@
 - `actions.py` 提升residual权限, 加大residual作用范围
     - residual_scale_fraction: 0.20 -> 0.50
     - maximum_residual_scale: 0.50 -> 0.80
+
+## 26-09-17_14:00
+
+- `push_linear_velocity` 0.5 -> 1.0
+- `push_yaw_velocity` 0.3 -> 0.6
+- `PPO_STEPS_PER_ENV` 24 -> 48
+- `root_position_reward` 奖励函数模型变化, 重点奖励高度, 水平方向提供弱拉力
+- `object_reward` 区分 object 速度方向奖励与速度模长奖励.
+- `action_magnitude_weight` 0.005 -> 0.05
+- `action_rate_weight` 0.05 -> 0.10
+- `root_tracking_error` `max_error` 0.75 -> 1.5

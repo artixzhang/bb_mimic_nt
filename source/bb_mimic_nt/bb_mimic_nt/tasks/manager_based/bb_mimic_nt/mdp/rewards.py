@@ -28,7 +28,11 @@ from .contacts import contact_graph
 
 
 def root_position_reward(actual: torch.Tensor, reference: torch.Tensor, sigma: float) -> torch.Tensor:
-    return gaussian(torch.sum((actual - reference) ** 2, dim=-1), sigma)
+    z_error_sq = (actual[:, 2] - reference[:, 2]) ** 2
+    r_z = gaussian(z_error_sq, sigma)
+    xy_error_sq = torch.sum((actual[:, :2] - reference[:, :2]) ** 2, dim=-1)
+    r_xy = rational_kernel(xy_error_sq, 0.1)
+    return 0.8 * r_z + 0.2 * r_xy
 
 
 def root_rotation_reward(actual: torch.Tensor, reference: torch.Tensor, sigma: float) -> torch.Tensor:
@@ -61,6 +65,32 @@ def object_position_reward(actual: torch.Tensor, reference: torch.Tensor, sigma:
     return rational_kernel(torch.sum((actual - reference) ** 2, dim=-1), sigma)
 
 
+def object_direction_reward(actual: torch.Tensor, reference: torch.Tensor, sigma: float) -> torch.Tensor:
+    actual_norm = torch.linalg.vector_norm(actual, dim=-1)
+    ref_norm = torch.linalg.vector_norm(reference, dim=-1)
+    
+    # 球处于静止阶段 (比如准备期 ref_speed < 0.2 m/s), 方向未定义, 直接给满分 1.0
+    is_moving = ref_norm > 0.2
+    
+    # cos(theta) = (v1 · v2) / (|v1| * |v2|)
+    denom = (actual_norm * ref_norm).clamp_min(1e-6)
+    cos_theta = (torch.sum(actual * reference, dim=-1) / denom).clamp(-1.0, 1.0)
+
+    # error^2 \sim 2*(1-cos(\theta))
+    directional_error_sq = 2.0 * (1.0 - cos_theta)
+
+    direction_score = rational_kernel(directional_error_sq, sigma)
+    
+    return torch.where(is_moving, direction_score, torch.ones_like(direction_score))
+
+
+def object_speed_reward(actual: torch.Tensor, reference: torch.Tensor, sigma: float) -> torch.Tensor:
+    actual_speed = torch.linalg.vector_norm(actual, dim=-1)
+    ref_speed = torch.linalg.vector_norm(reference, dim=-1)
+    speed_error_sq = (actual_speed - ref_speed) ** 2
+    return rational_kernel(speed_error_sq, sigma)
+
+
 def object_rotation_reward(actual: torch.Tensor, reference: torch.Tensor, sigma: float) -> torch.Tensor:
     return gaussian(quat_error_magnitude(actual, reference) ** 2, sigma)
 
@@ -80,22 +110,25 @@ def contact_graph_reward(
 class UnifiedRewardCfg:
     global_weights: tuple[float, float, float, float] = (0.45, 0.25, 0.20, 0.10)
     body_weights: tuple[float, float, float] = (0.30, 0.40, 0.30)
-    root_weights: tuple[float, float, float, float] = (0.35, 0.25, 0.20, 0.20)
+    root_weights: tuple[float, float, float, float] = (0.35, 0.35, 0.20, 0.10)
     joint_weights: tuple[float, float] = (0.70, 0.30)
     link_weights: tuple[float, float] = (0.70, 0.30)
-    object_weights: tuple[float, float] = (1.0, 0.0)
+
+    # position, direction, speed_magnitude, rotation
+    object_weights: tuple[float, float, float, float] = (0.45, 0.35, 0.2, 0.0)
+    object_sigmas: tuple[float, float, float, float] = (10.0, 8.0, 0.5, 1.0)
+
     relative_weights: tuple[float, float] = (1.0, 0.0)
-    root_sigmas: tuple[float, float, float, float] = (20.0, 5.0, 2.0, 0.5)
+    root_sigmas: tuple[float, float, float, float] = (20.0, 10.0, 2.0, 0.5)
     joint_sigmas: tuple[float, float] = (4.0, 0.1)
     link_sigmas: tuple[float, float] = (40.0, 5.0)
-    object_sigmas: tuple[float, float] = (20.0, 1.0)
     relative_sigmas: tuple[float, float] = (40.0, 1.0)
     hand_contact_sensitivity: float = 2.0
     foot_contact_sensitivity: float = 1.0
     hand_contact_force: float = 1.0
     foot_contact_force: float = 5.0
-    action_magnitude_weight: float = 0.005
-    action_rate_weight: float = 0.05
+    action_magnitude_weight: float = 0.05
+    action_rate_weight: float = 0.10
     target_residual_rate_weight: float = 0.05
     torque_weight: float = 0.005
     limit_weight: float = 0.05
@@ -243,8 +276,14 @@ class UnifiedMimicReward(ManagerTermBase):
             "mimic/object/position": object_position_reward(
                 term.ball.data.root_pos_w - origin, reference["object_pos"], settings.object_sigmas[0]
             ),
+            "mimic/object/direction": object_direction_reward(
+                term.ball.data.root_lin_vel_w, reference["object_lin_vel"], settings.object_sigmas[1]
+            ),
+            "mimic/object/speed": object_speed_reward(
+                term.ball.data.root_lin_vel_w, reference["object_lin_vel"], settings.object_sigmas[2]
+            ),
             "mimic/object/rotation": object_rotation_reward(
-                term.ball.data.root_quat_w, reference["object_quat"], settings.object_sigmas[1]
+                term.ball.data.root_quat_w, reference["object_quat"], settings.object_sigmas[3]
             ),
         }
         obj = normalized_weighted_sum(tuple(object_parts.values()), settings.object_weights)

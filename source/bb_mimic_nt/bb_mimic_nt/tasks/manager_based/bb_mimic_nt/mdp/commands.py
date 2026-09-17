@@ -649,7 +649,7 @@ class MotionReferenceCommandCfg(CommandTermCfg):
     adaptive_initial_error: float = 0.50
     speed_update_interval_s: float = 0.10
     enable_push: bool = True
-    push_linear_velocity: float = 0.5
-    push_yaw_velocity: float = 0.3
+    push_linear_velocity: float = 1.0
+    push_yaw_velocity: float = 0.6
     success_radius: float = 0.20
     resampling_time_range: tuple[float, float] = (1.0e9, 1.0e9)

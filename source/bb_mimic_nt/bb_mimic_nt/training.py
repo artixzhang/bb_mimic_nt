@@ -3,7 +3,7 @@
 
 """Training constants shared by environment curricula and PPO."""
 
-PPO_STEPS_PER_ENV = 24
+PPO_STEPS_PER_ENV = 48
 PPO_MAX_ITERATIONS = 3_000
 RSI_DECAY_FRACTION = 0.30
 TOTAL_POLICY_STEPS = PPO_STEPS_PER_ENV * PPO_MAX_ITERATIONS

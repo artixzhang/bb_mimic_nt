@@ -27,6 +27,11 @@ parser.add_argument(
     action="store_true",
     help="Disable early failure terminations so the complete reference can be inspected.",
 )
+parser.add_argument(
+    "--no-timeout",
+    action="store_true",
+    help="Disable reference completion and episode length timeout (failures will still reset).",
+)
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
@@ -97,6 +102,10 @@ def main(env_cfg, agent_cfg):
         env_cfg.terminations.root_tracking_error = None
         env_cfg.terminations.dof_tracking_error = None
         env_cfg.terminations.interaction_tracking_error = None
+
+    if args_cli.no_timeout:
+        env_cfg.terminations.reference_finished = None
+        env_cfg.episode_length_s = 1e9
 
     gym_env = gym.make(args_cli.task, cfg=env_cfg)
     base_env = gym_env.unwrapped
