@@ -13,11 +13,11 @@ from isaaclab.assets import Articulation
 from isaaclab.managers import ActionTerm, ActionTermCfg
 from isaaclab.utils import configclass
 
-from bb_mimic_nt.core import low_pass_filter, rate_limit_target, reference_residual_target
+from bb_mimic_nt.core import reference_residual_target
 
 
 class ReferenceResidualJointPositionAction(ActionTerm):
-    """Apply a safe, slew-limited residual around the current motion reference.
+    """Apply a bounded residual around the current motion reference.
 
     A zero policy action follows the reference joint pose.  The policy only
     learns the feedback correction required by physics and ball interaction,
@@ -34,14 +34,8 @@ class ReferenceResidualJointPositionAction(ActionTerm):
             raise ValueError("residual_scale_fraction must be in (0, 1].")
         if cfg.minimum_residual_scale <= 0.0 or cfg.maximum_residual_scale < cfg.minimum_residual_scale:
             raise ValueError("Residual scale bounds must be positive and ordered.")
-        if not 0.0 < cfg.mechanical_velocity_limit_fraction <= 1.0:
-            raise ValueError("mechanical_velocity_limit_fraction must be in (0, 1].")
-        if cfg.reference_velocity_headroom < 1.0 or cfg.minimum_target_velocity <= 0.0:
-            raise ValueError("Reference velocity headroom and minimum target velocity are invalid.")
         if cfg.position_limit_margin < 0.0:
             raise ValueError("position_limit_margin must be non-negative.")
-        if cfg.residual_filter_time_constant_s < 0.0:
-            raise ValueError("residual_filter_time_constant_s must be non-negative.")
         self._joint_ids, self._joint_names = self._asset.find_joints(cfg.joint_names, preserve_order=True)
         if len(self._joint_ids) != len(cfg.joint_names):
             raise ValueError(
@@ -55,11 +49,8 @@ class ReferenceResidualJointPositionAction(ActionTerm):
 
         self._raw_actions = torch.zeros(self.num_envs, len(self._joint_ids), device=self.device)
         self._previous_raw_actions = torch.zeros_like(self._raw_actions)
-        self._filtered_actions = torch.zeros_like(self._raw_actions)
-        self._previous_filtered_actions = torch.zeros_like(self._raw_actions)
-        self._processed_actions = torch.zeros_like(self._raw_actions)
-        self._previous_processed_actions = torch.zeros_like(self._raw_actions)
         self._desired_actions = torch.zeros_like(self._raw_actions)
+        self._previous_desired_actions = torch.zeros_like(self._raw_actions)
         self._reference_positions = torch.zeros_like(self._raw_actions)
         self._previous_reference_positions = torch.zeros_like(self._raw_actions)
         self._nominal = self._asset.data.default_joint_pos[:, self._joint_ids].clone()
@@ -87,17 +78,6 @@ class ReferenceResidualJointPositionAction(ActionTerm):
             min=cfg.minimum_residual_scale,
             max=cfg.maximum_residual_scale,
         )
-        mechanical_target_velocity = (
-            self._asset.data.joint_vel_limits[:, self._joint_ids].clamp_min(1.0e-6)
-            * cfg.mechanical_velocity_limit_fraction
-        )
-        reference_target_velocity = (
-            self._command.maximum_reference_dof_speed * cfg.reference_velocity_headroom
-        ).clamp_min(cfg.minimum_target_velocity)
-        self._target_velocity_limit = torch.minimum(
-            mechanical_target_velocity,
-            reference_target_velocity[None].expand_as(mechanical_target_velocity),
-        )
         self.synchronize_reference()
 
     @property
@@ -113,24 +93,17 @@ class ReferenceResidualJointPositionAction(ActionTerm):
         return self._previous_raw_actions
 
     @property
-    def filtered_actions(self) -> torch.Tensor:
-        return self._filtered_actions
-
-    @property
-    def previous_filtered_actions(self) -> torch.Tensor:
-        return self._previous_filtered_actions
-
-    @property
     def processed_actions(self) -> torch.Tensor:
-        return self._processed_actions
+        # Required by Isaac Lab's ActionTerm; the bounded target is applied directly.
+        return self._desired_actions
 
     @property
     def desired_actions(self) -> torch.Tensor:
         return self._desired_actions
 
     @property
-    def previous_processed_actions(self) -> torch.Tensor:
-        return self._previous_processed_actions
+    def previous_desired_actions(self) -> torch.Tensor:
+        return self._previous_desired_actions
 
     @property
     def reference_positions(self) -> torch.Tensor:
@@ -146,39 +119,23 @@ class ReferenceResidualJointPositionAction(ActionTerm):
 
     def process_actions(self, actions: torch.Tensor) -> None:
         self._previous_raw_actions[:] = self._raw_actions
-        self._previous_filtered_actions[:] = self._filtered_actions
-        self._previous_processed_actions[:] = self._processed_actions
+        self._previous_desired_actions[:] = self._desired_actions
         self._previous_reference_positions[:] = self._reference_positions
         # RSL-RL samples an unbounded Gaussian.  A smooth tanh transform avoids
         # the large dead zones created when many samples are hard-clipped at
         # +/-1 while preserving a bounded residual command.
         self._raw_actions[:] = torch.tanh(actions)
-        # The reference pose is feed-forward and remains unfiltered. Only the
-        # learned feedback residual is low-pass filtered, suppressing 100 Hz
-        # sign reversals without delaying the demonstrated jump motion.
-        self._filtered_actions[:] = low_pass_filter(
-            self._raw_actions,
-            self._previous_filtered_actions,
-            self._env.step_dt,
-            self.cfg.residual_filter_time_constant_s,
-        )
         self._reference_positions[:] = self._command.reference["dof_pos"]
         self._desired_actions[:] = reference_residual_target(
-            self._filtered_actions,
+            self._raw_actions,
             self._reference_positions,
             self._residual_scale,
             self._lower,
             self._upper,
         )
-        self._processed_actions[:] = rate_limit_target(
-            self._desired_actions,
-            self._previous_processed_actions,
-            self._target_velocity_limit,
-            self._env.step_dt,
-        )
 
     def apply_actions(self) -> None:
-        self._asset.set_joint_position_target(self._processed_actions, joint_ids=self._joint_ids)
+        self._asset.set_joint_position_target(self._desired_actions, joint_ids=self._joint_ids)
 
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
         if env_ids is None:
@@ -195,13 +152,10 @@ class ReferenceResidualJointPositionAction(ActionTerm):
         reference = torch.maximum(torch.minimum(reference, self._upper[env_ids]), self._lower[env_ids])
         self._raw_actions[env_ids] = 0.0
         self._previous_raw_actions[env_ids] = 0.0
-        self._filtered_actions[env_ids] = 0.0
-        self._previous_filtered_actions[env_ids] = 0.0
         self._reference_positions[env_ids] = reference
         self._previous_reference_positions[env_ids] = reference
         self._desired_actions[env_ids] = reference
-        self._processed_actions[env_ids] = reference
-        self._previous_processed_actions[env_ids] = reference
+        self._previous_desired_actions[env_ids] = reference
 
 
 @configclass
@@ -212,8 +166,4 @@ class ReferenceResidualJointPositionActionCfg(ActionTermCfg):
     residual_scale_fraction: float = 0.50
     minimum_residual_scale: float = 0.10
     maximum_residual_scale: float = 0.80
-    mechanical_velocity_limit_fraction: float = 0.90
-    reference_velocity_headroom: float = 1.50
-    minimum_target_velocity: float = 4.0
     position_limit_margin: float = 0.020
-    residual_filter_time_constant_s: float = 0.040

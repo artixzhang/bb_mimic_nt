@@ -17,6 +17,7 @@ from bb_mimic_nt.trajectory import (
     CACHE_SCHEMA_VERSION,
     CONTACT_NAMES,
     EXPECTED_DOF_NAMES,
+    ROTATION_ONLY_TRACKING_BODIES,
     TRACKED_BODY_NAMES,
     cache_is_current,
     load_motion_batch,
@@ -24,6 +25,7 @@ from bb_mimic_nt.trajectory import (
 )
 from bb_mimic_nt.trajectory.processing import (
     _compute_fk,
+    _quat_multiply,
     _quat_to_matrix,
     finite_difference,
     quaternion_angular_velocity,
@@ -45,6 +47,10 @@ def test_real_batch_validation_contact_reordering_padding_and_hashes() -> None:
     assert len(dof_names) == 29
     assert dof_names == EXPECTED_DOF_NAMES
     assert cache["metadata"]["schema_version"] == CACHE_SCHEMA_VERSION
+    assert tuple(cache["metadata"]["rotation_body_names"]) == tuple(
+        name for name, _ in ROTATION_ONLY_TRACKING_BODIES
+    )
+    assert cache["rotation_quat_b"].shape[-2:] == (len(ROTATION_ONLY_TRACKING_BODIES), 4)
     assert tuple(cache["metadata"]["contact_names"]) == CONTACT_NAMES
     assert cache_is_current(CACHE, SOURCE, URDF)
     assert cache["anchor_pos_b"].shape[-2:] == (2, 3)
@@ -125,6 +131,23 @@ def test_pinocchio_fk_world_and_root_local_are_consistent() -> None:
     reconstructed = root_pos[:, None] + np.einsum("tij,tkj->tki", rotation, result["link_pos_b"])
     assert np.allclose(reconstructed, result["link_pos_w"], atol=1.0e-5)
     assert np.allclose(np.linalg.norm(result["link_quat_w"], axis=-1), 1.0, atol=1.0e-5)
+    assert result["rotation_quat_b"].shape == (frame_count, len(ROTATION_ONLY_TRACKING_BODIES), 4)
+    world_yaw = np.broadcast_to(np.array((0.7071068, 0.0, 0.0, 0.7071068)), root_quat.shape)
+    rotated_root = _quat_multiply(world_yaw, root_quat)
+    rotated = _compute_fk(
+        root_pos, rotated_root, np.asarray(clip["dof"][:frame_count], dtype=np.float32),
+        tuple(clip["dof_names"]), URDF, TRACKED_BODY_NAMES,
+        {"left_hand": (0.082, -0.115, 0.0), "right_hand": (0.082, 0.115, 0.0)},
+        rotation_body_names=tuple(name for name, _ in ROTATION_ONLY_TRACKING_BODIES) + ("left_elbow_link",),
+    )
+    assert rotated["rotation_quat_b"].shape == (frame_count, len(ROTATION_ONLY_TRACKING_BODIES) + 1, 4)
+    alignment = np.abs(
+        np.sum(
+            result["rotation_quat_b"] * rotated["rotation_quat_b"][:, : len(ROTATION_ONLY_TRACKING_BODIES)],
+            axis=-1,
+        )
+    )
+    assert np.allclose(alignment, 1.0, atol=1.0e-5)
 
 
 def test_cache_hash_invalidation(tmp_path: Path) -> None:
@@ -144,6 +167,8 @@ def test_cache_hash_invalidation(tmp_path: Path) -> None:
                 "source_sha256": sha(source),
                 "urdf_sha256": sha(urdf),
                 "tracked_body_names": list(TRACKED_BODY_NAMES),
+                "rotation_body_names": [name for name, _ in ROTATION_ONLY_TRACKING_BODIES],
+                "rotation_body_weights": [weight for _, weight in ROTATION_ONLY_TRACKING_BODIES],
                 "contact_names": list(CONTACT_NAMES),
             }
         },

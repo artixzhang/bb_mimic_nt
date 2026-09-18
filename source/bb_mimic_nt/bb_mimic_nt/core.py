@@ -23,31 +23,6 @@ def reference_residual_target(
     return torch.maximum(torch.minimum(desired, upper), lower)
 
 
-def rate_limit_target(
-    desired: torch.Tensor,
-    previous: torch.Tensor,
-    maximum_velocity: torch.Tensor,
-    dt: float,
-) -> torch.Tensor:
-    """Limit position-target motion to a physically meaningful velocity."""
-    maximum_delta = maximum_velocity * float(dt)
-    delta = torch.maximum(torch.minimum(desired - previous, maximum_delta), -maximum_delta)
-    return previous + delta
-
-
-def low_pass_filter(
-    value: torch.Tensor,
-    previous: torch.Tensor,
-    dt: float,
-    time_constant: float,
-) -> torch.Tensor:
-    """Apply a first-order low-pass filter with a time-step invariant pole."""
-    if time_constant <= 0.0:
-        return value
-    alpha = 1.0 - math.exp(-float(dt) / float(time_constant))
-    return previous + alpha * (value - previous)
-
-
 def slerp_wxyz(first: torch.Tensor, second: torch.Tensor, blend: torch.Tensor) -> torch.Tensor:
     """Shortest-arc quaternion interpolation for batched WXYZ tensors."""
     dot = torch.sum(first * second, dim=-1, keepdim=True)

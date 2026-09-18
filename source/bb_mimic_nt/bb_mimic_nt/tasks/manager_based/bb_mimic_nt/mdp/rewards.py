@@ -55,10 +55,15 @@ def link_position_reward(actual: torch.Tensor, reference: torch.Tensor, sigma: f
     return gaussian(torch.sum((actual - reference) ** 2, dim=-1), sigma).mean(dim=-1)
 
 
-def link_rotation_reward(actual: torch.Tensor, reference: torch.Tensor, sigma: float) -> torch.Tensor:
+def link_rotation_reward(
+    actual: torch.Tensor, reference: torch.Tensor, sigma: float, weights: torch.Tensor | None = None
+) -> torch.Tensor:
     shape = actual.shape
     error = quat_error_magnitude(actual.reshape(-1, 4), reference.reshape(-1, 4)).reshape(shape[:2])
-    return gaussian(error**2, sigma).mean(dim=-1)
+    scores = gaussian(error**2, sigma)
+    if weights is None:
+        return scores.mean(dim=-1)
+    return torch.sum(scores * weights, dim=-1) / torch.sum(weights)
 
 
 def object_position_reward(actual: torch.Tensor, reference: torch.Tensor, sigma: float) -> torch.Tensor:
@@ -109,30 +114,31 @@ def contact_graph_reward(
 @configclass
 class UnifiedRewardCfg:
     global_weights: tuple[float, float, float, float] = (0.45, 0.25, 0.20, 0.10)
-    body_weights: tuple[float, float, float] = (0.30, 0.40, 0.30)
+    body_weights: tuple[float, float, float, float] = (0.27, 0.36, 0.27, 0.10)
     root_weights: tuple[float, float, float, float] = (0.35, 0.35, 0.20, 0.10)
     joint_weights: tuple[float, float] = (0.70, 0.30)
     link_weights: tuple[float, float] = (0.70, 0.30)
 
     # position, direction, speed_magnitude, rotation
     object_weights: tuple[float, float, float, float] = (0.45, 0.35, 0.2, 0.0)
-    object_sigmas: tuple[float, float, float, float] = (10.0, 8.0, 0.5, 1.0)
+    object_sigmas: tuple[float, float, float, float] = (8.0, 6.0, 0.5, 1.0)
 
     relative_weights: tuple[float, float] = (1.0, 0.0)
     root_sigmas: tuple[float, float, float, float] = (20.0, 10.0, 2.0, 0.5)
     joint_sigmas: tuple[float, float] = (4.0, 0.1)
     link_sigmas: tuple[float, float] = (40.0, 5.0)
+    rotation_only_sigma: float = 5.0
     relative_sigmas: tuple[float, float] = (40.0, 1.0)
     hand_contact_sensitivity: float = 2.0
     foot_contact_sensitivity: float = 1.0
     hand_contact_force: float = 1.0
     foot_contact_force: float = 5.0
     action_magnitude_weight: float = 0.05
-    action_rate_weight: float = 0.10
+    action_rate_weight: float = 0.25
     target_residual_rate_weight: float = 0.05
     torque_weight: float = 0.005
     limit_weight: float = 0.05
-    joint_velocity_error_weight: float = 0.02
+    joint_velocity_error_weight: float = 0.001
     regularization_clip: float = 1.0
     termination_penalty: float = 50.0
 
@@ -141,11 +147,12 @@ def regularization_cost(term: MotionReferenceCommand, settings: UnifiedRewardCfg
     robot = term.robot
     joint_ids = term.joint_ids
     action_term = env.action_manager.get_term("joint_pos")
-    action_magnitude = torch.mean(action_term.filtered_actions**2, dim=-1)
+    action_magnitude = torch.mean(action_term.raw_actions**2, dim=-1)
     action_rate = torch.mean((action_term.raw_actions - action_term.previous_raw_actions) ** 2, dim=-1)
-    current_residual = (action_term.processed_actions - action_term.reference_positions) / action_term.residual_scale
+    # Measure the target residual after position clipping; away from the limits this equals action_rate.
+    current_residual = (action_term.desired_actions - action_term.reference_positions) / action_term.residual_scale
     previous_residual = (
-        action_term.previous_processed_actions - action_term.previous_reference_positions
+        action_term.previous_desired_actions - action_term.previous_reference_positions
     ) / action_term.residual_scale
     target_residual_rate = torch.mean((current_residual - previous_residual) ** 2, dim=-1)
 
@@ -161,10 +168,8 @@ def regularization_cost(term: MotionReferenceCommand, settings: UnifiedRewardCfg
     limit_cost = torch.mean((torch.relu(normalized_pos - 0.9) / 0.1) ** 2, dim=-1)
 
     joint_vel = robot.data.joint_vel[:, joint_ids]
-    velocity_limit = robot.data.joint_vel_limits[:, joint_ids].clamp_min(1.0e-6)
-    joint_velocity_error = torch.mean(
-        ((joint_vel - term.reference["dof_vel"]) / velocity_limit) ** 2, dim=-1
-    )
+    joint_velocity_error = torch.mean((joint_vel - term.reference["dof_vel"]) ** 2, dim=-1)
+
     weighted = clipped_regularization(
         (
             action_magnitude,
@@ -270,7 +275,16 @@ class UnifiedMimicReward(ManagerTermBase):
             ),
         }
         link = normalized_weighted_sum(tuple(link_parts.values()), settings.link_weights)
-        body = normalized_weighted_sum((root, joint, link), settings.body_weights)
+        rotation_body_quat = robot.data.body_quat_w[:, term.rotation_body_ids]
+        rotation_root_quat = robot.data.root_link_quat_w[:, None].expand_as(rotation_body_quat)
+        rotation_quat_b = quat_mul(
+            quat_inv(rotation_root_quat.reshape(-1, 4)), rotation_body_quat.reshape(-1, 4)
+        ).reshape_as(rotation_body_quat)
+        rotation_only = link_rotation_reward(
+            rotation_quat_b, reference["rotation_quat_b"], settings.rotation_only_sigma,
+            term.rotation_body_weights,
+        )
+        body = normalized_weighted_sum((root, joint, link, rotation_only), settings.body_weights)
 
         object_parts = {
             "mimic/object/position": object_position_reward(
@@ -332,6 +346,7 @@ class UnifiedMimicReward(ManagerTermBase):
                 "mimic/body/root": root,
                 "mimic/body/joint": joint,
                 "mimic/body/link": link,
+                "mimic/body/rotation_only": rotation_only,
                 "mimic/body": body,
                 "mimic/object": obj,
                 "mimic/relative": relative,

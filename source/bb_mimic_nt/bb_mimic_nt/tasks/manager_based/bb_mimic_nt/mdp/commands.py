@@ -69,6 +69,12 @@ class MotionReferenceCommand(CommandTerm):
         metadata = self._batch["metadata"]
         self.dof_names = tuple(metadata["dof_names"])
         self.tracked_body_names = tuple(metadata["tracked_body_names"])
+        self.rotation_body_names = tuple(metadata["rotation_body_names"])
+        self.rotation_body_weights = torch.tensor(
+            metadata["rotation_body_weights"], dtype=torch.float, device=self.device
+        )
+        if len(self.rotation_body_names) != len(self.rotation_body_weights) or torch.any(self.rotation_body_weights <= 0):
+            raise ValueError("Rotation-only tracked bodies must have positive matching weights.")
         self.contact_names = tuple(metadata["contact_names"])
         self.anchor_offsets = torch.tensor(
             [metadata["anchor_offsets"][name] for name in metadata["anchor_body_names"]],
@@ -77,10 +83,17 @@ class MotionReferenceCommand(CommandTerm):
         )
         self.joint_ids, resolved_joint_names = self.robot.find_joints(self.dof_names, preserve_order=True)
         self.body_ids, resolved_body_names = self.robot.find_bodies(self.tracked_body_names, preserve_order=True)
+        self.rotation_body_ids, resolved_rotation_names = self.robot.find_bodies(
+            self.rotation_body_names, preserve_order=True
+        )
         if tuple(resolved_joint_names) != self.dof_names:
             raise ValueError(f"Robot/cache joint mismatch: {resolved_joint_names} != {self.dof_names}")
         if tuple(resolved_body_names) != self.tracked_body_names:
             raise ValueError(f"Robot/cache body mismatch: {resolved_body_names} != {self.tracked_body_names}")
+        if tuple(resolved_rotation_names) != self.rotation_body_names:
+            raise ValueError(
+                f"Robot/cache rotation body mismatch: {resolved_rotation_names} != {self.rotation_body_names}"
+            )
         if tuple(self.tracked_body_names[:2]) != ("left_hand", "right_hand"):
             raise ValueError("The first two tracked bodies must be left_hand and right_hand.")
         for anchor_path in (
@@ -147,8 +160,6 @@ class MotionReferenceCommand(CommandTerm):
             "error/contact_mismatch_rate": torch.zeros(self.num_envs, device=self.device),
             "control/raw_action_rms": torch.zeros(self.num_envs, device=self.device),
             "control/raw_action_delta_rms": torch.zeros(self.num_envs, device=self.device),
-            "control/filtered_action_rms": torch.zeros(self.num_envs, device=self.device),
-            "control/filtered_action_delta_rms": torch.zeros(self.num_envs, device=self.device),
             "control/action_saturation_rate": torch.zeros(self.num_envs, device=self.device),
             "control/joint_target_delta_rms_rad": torch.zeros(self.num_envs, device=self.device),
             "control/reference_joint_delta_rms_rad": torch.zeros(self.num_envs, device=self.device),
@@ -156,6 +167,12 @@ class MotionReferenceCommand(CommandTerm):
             "control/joint_velocity_rms_radps": torch.zeros(self.num_envs, device=self.device),
             "control/torque_limit_ratio_rms": torch.zeros(self.num_envs, device=self.device),
         }
+        self.metrics.update(
+            {
+                f"error/rotation/{name}_rad": torch.zeros(self.num_envs, device=self.device)
+                for name in self.rotation_body_names
+            }
+        )
         self._time_averaged_metric_names = tuple(name for name in self.metrics if name != "shot_success")
         self.last_episode_metrics = {
             name: torch.zeros(self.num_envs, device=self.device) for name in self.metrics
@@ -195,7 +212,7 @@ class MotionReferenceCommand(CommandTerm):
         )
 
     def _refresh_reference(self) -> None:
-        quaternion_fields = {"root_quat", "object_quat", "link_quat_w", "link_quat_b"}
+        quaternion_fields = {"root_quat", "object_quat", "link_quat_w", "link_quat_b", "rotation_quat_b"}
         fields = (
             "root_pos",
             "root_quat",
@@ -213,6 +230,7 @@ class MotionReferenceCommand(CommandTerm):
             "link_quat_w",
             "link_pos_b",
             "link_quat_b",
+            "rotation_quat_b",
             "anchor_pos_w",
             "anchor_object_rel_pos_w",
         )
@@ -426,6 +444,14 @@ class MotionReferenceCommand(CommandTerm):
         link_rotation_error = quat_error_magnitude(
             actual_link_quat.reshape(-1, 4), self.reference["link_quat_b"].reshape(-1, 4)
         ).reshape(self.num_envs, len(self.body_ids))
+        rotation_body_quat = self.robot.data.body_quat_w[:, self.rotation_body_ids]
+        rotation_root_quat = root_quat[:, None].expand_as(rotation_body_quat)
+        rotation_quat_b = quat_mul(
+            quat_inv(rotation_root_quat.reshape(-1, 4)), rotation_body_quat.reshape(-1, 4)
+        )
+        rotation_error = quat_error_magnitude(
+            rotation_quat_b, self.reference["rotation_quat_b"].reshape(-1, 4)
+        ).reshape(self.num_envs, len(self.rotation_body_ids))
         actual_relative_position = self.actual_anchor_pos_w() - ball_position[:, None]
         actual_contact = contact_graph(self._env)
         action_term = self._env.action_manager.get_term("joint_pos")
@@ -451,6 +477,10 @@ class MotionReferenceCommand(CommandTerm):
                 torch.mean((joint_vel - self.reference["dof_vel"]) ** 2, dim=-1)
             ),
             "error/link_rotation_rmse_rad": torch.sqrt(torch.mean(link_rotation_error**2, dim=-1)),
+            **{
+                f"error/rotation/{name}_rad": rotation_error[:, index]
+                for index, name in enumerate(self.rotation_body_names)
+            },
             "error/ball_rotation_rad": quat_error_magnitude(
                 self.ball.data.root_quat_w, self.reference["object_quat"]
             ),
@@ -473,24 +503,15 @@ class MotionReferenceCommand(CommandTerm):
             "control/raw_action_delta_rms": torch.sqrt(
                 torch.mean((raw_action - action_term.previous_raw_actions) ** 2, dim=-1)
             ),
-            "control/filtered_action_rms": torch.sqrt(
-                torch.mean(action_term.filtered_actions**2, dim=-1)
-            ),
-            "control/filtered_action_delta_rms": torch.sqrt(
-                torch.mean(
-                    (action_term.filtered_actions - action_term.previous_filtered_actions) ** 2,
-                    dim=-1,
-                )
-            ),
             "control/action_saturation_rate": torch.mean((torch.abs(raw_action) >= 0.999).float(), dim=-1),
             "control/joint_target_delta_rms_rad": torch.sqrt(
-                torch.mean((action_term.processed_actions - action_term.previous_processed_actions) ** 2, dim=-1)
+                torch.mean((action_term.desired_actions - action_term.previous_desired_actions) ** 2, dim=-1)
             ),
             "control/reference_joint_delta_rms_rad": torch.sqrt(
                 torch.mean((self.reference["dof_pos"] - self._previous_reference_dof_pos) ** 2, dim=-1)
             ),
             "control/pd_error_rmse_rad": torch.sqrt(
-                torch.mean((action_term.processed_actions - joint_pos) ** 2, dim=-1)
+                torch.mean((action_term.desired_actions - joint_pos) ** 2, dim=-1)
             ),
             "control/joint_velocity_rms_radps": torch.sqrt(torch.mean(joint_vel**2, dim=-1)),
             "control/torque_limit_ratio_rms": torch.sqrt(

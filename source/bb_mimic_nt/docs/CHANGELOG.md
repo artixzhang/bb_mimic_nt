@@ -41,7 +41,7 @@
     - residual_scale_fraction: 0.20 -> 0.50
     - maximum_residual_scale: 0.50 -> 0.80
 
-## 26-09-17_14:00
+## 26-09-17_14-00
 
 - `push_linear_velocity` 0.5 -> 1.0
 - `push_yaw_velocity` 0.3 -> 0.6
@@ -51,3 +51,10 @@
 - `action_magnitude_weight` 0.005 -> 0.05
 - `action_rate_weight` 0.05 -> 0.10
 - `root_tracking_error` `max_error` 0.75 -> 1.5
+
+## 26-09-18_14-17
+- remove residual action filter. policy 的 `tanh` 输出直接用于 reference-relative PD target.
+- remove 关节目标的历史速度限制, 以及独立的 `processed_actions` 状态, `desired_actions` 经位置限制后直接作为 PD target.
+- add root-local link 旋转追踪. 加入 `torso` 管控; 增加对应数据处理缓存.
+- `PPO_STEPS_PER_ENV` 24 -> 96 显著提升 reward.
+- `init_noise_std` 0.4 -> 0.25 降低初始噪声.

@@ -17,9 +17,7 @@ from bb_mimic_nt.core import (
     downward_hoop_crossing,
     gated_top_level_reward,
     interpolate_motion,
-    low_pass_filter,
     normalized_weighted_sum,
-    rate_limit_target,
     rational_kernel,
     reference_residual_target,
     rsi_probability,
@@ -29,7 +27,7 @@ from bb_mimic_nt.core import (
 from bb_mimic_nt.training import PPO_MAX_ITERATIONS, PPO_STEPS_PER_ENV, RSI_DECAY_STEPS, TEACHER_OBSERVATION_DIM
 
 
-def test_reference_residual_action_and_target_rate_limit() -> None:
+def test_reference_residual_action_target_limits() -> None:
     action = torch.tensor([[-1.0, 0.0, 1.0]])
     reference = torch.tensor([[0.5, 1.0, 1.5]])
     scale = torch.tensor([[0.2, 0.3, 0.4]])
@@ -38,18 +36,7 @@ def test_reference_residual_action_and_target_rate_limit() -> None:
     desired = reference_residual_target(action, reference, scale, lower, upper)
     assert torch.allclose(desired, torch.tensor([[0.4, 1.0, 1.8]]))
 
-    limited = rate_limit_target(
-        desired,
-        previous=torch.tensor([[0.5, 0.5, 1.5]]),
-        maximum_velocity=torch.tensor([[2.0, 4.0, 1.0]]),
-        dt=0.1,
-    )
-    assert torch.allclose(limited, torch.tensor([[0.4, 0.9, 1.6]]))
     assert rational_kernel(torch.tensor([0.0, 4.0]), 0.5).tolist() == pytest.approx([1.0, 1.0 / 3.0])
-
-    filtered = low_pass_filter(torch.ones(1), torch.zeros(1), dt=0.01, time_constant=0.04)
-    assert filtered.item() == pytest.approx(1.0 - math.exp(-0.25))
-    assert torch.equal(low_pass_filter(torch.ones(1), torch.zeros(1), 0.01, 0.0), torch.ones(1))
 
 
 def test_rsi_schedule_uses_central_training_length() -> None:

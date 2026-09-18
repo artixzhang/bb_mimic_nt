@@ -74,14 +74,13 @@ def hoop_pos_b(env) -> torch.Tensor:
 
 
 def previous_action(env) -> torch.Tensor:
-    # Expose the residual that actually drives the PD target. This is the
-    # filter state required to keep the controlled process Markovian.
-    return env.action_manager.get_term("joint_pos").filtered_actions
+    # Expose the bounded residual used to form the PD target.
+    return env.action_manager.get_term("joint_pos").raw_actions
 
 
 def pd_error(env) -> torch.Tensor:
     term = motion_command(env)
-    target = env.action_manager.get_term("joint_pos").processed_actions
+    target = env.action_manager.get_term("joint_pos").desired_actions
     return target - term.robot.data.joint_pos[:, term.joint_ids]
 
 

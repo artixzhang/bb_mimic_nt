@@ -18,7 +18,7 @@ import joblib
 import numpy as np
 import torch
 
-CACHE_SCHEMA_VERSION = 1
+CACHE_SCHEMA_VERSION = 2
 
 TRACKED_BODY_NAMES = (
     "left_hand",
@@ -26,6 +26,9 @@ TRACKED_BODY_NAMES = (
     "left_ankle_roll_link",
     "right_ankle_roll_link",
 )
+# Root-local rotation tracking only. Add (body name, relative weight) here;
+# these bodies do not enter link-position tracking or policy observations.
+ROTATION_ONLY_TRACKING_BODIES = (("torso_link", 1.0),)
 CONTACT_NAMES = (
     "left_hand_ball",
     "right_hand_ball",
@@ -273,6 +276,7 @@ def _compute_fk(
     urdf_path: str | Path,
     tracked_body_names: tuple[str, ...],
     anchor_offsets: dict[str, tuple[float, float, float]],
+    rotation_body_names: tuple[str, ...] = tuple(name for name, _ in ROTATION_ONLY_TRACKING_BODIES),
 ) -> dict[str, np.ndarray]:
     import pinocchio as pin
 
@@ -291,10 +295,17 @@ def _compute_fk(
         if frame_id >= len(model.frames):
             raise ValueError(f"URDF does not contain a frame named {name!r}.")
         frame_ids.append(frame_id)
+    rotation_frame_ids: list[int] = []
+    for name in rotation_body_names:
+        frame_id = model.getFrameId(name)
+        if frame_id >= len(model.frames):
+            raise ValueError(f"URDF does not contain a frame named {name!r}.")
+        rotation_frame_ids.append(frame_id)
 
     frame_count = len(root_pos)
     link_pos_w = np.empty((frame_count, len(frame_ids), 3), dtype=np.float32)
     link_quat_w = np.empty((frame_count, len(frame_ids), 4), dtype=np.float32)
+    rotation_quat_b = np.empty((frame_count, len(rotation_frame_ids), 4), dtype=np.float32)
     for frame_index in range(frame_count):
         q = pin.neutral(model)
         q[:3] = root_pos[frame_index]
@@ -307,6 +318,11 @@ def _compute_fk(
             placement = data.oMf[frame_id]
             link_pos_w[frame_index, body_index] = placement.translation
             link_quat_w[frame_index, body_index] = _matrix_to_quat_wxyz(placement.rotation)
+        root_rotation = _quat_to_matrix(root_quat_wxyz[frame_index])
+        for body_index, frame_id in enumerate(rotation_frame_ids):
+            rotation_quat_b[frame_index, body_index] = _matrix_to_quat_wxyz(
+                root_rotation.T @ data.oMf[frame_id].rotation
+            )
 
     root_rotation = _quat_to_matrix(root_quat_wxyz)
     link_pos_b = np.einsum(
@@ -322,6 +338,7 @@ def _compute_fk(
     link_quat_b = _normalize_quaternion_sequence(link_quat_b.reshape(frame_count, -1, 4)).reshape(
         link_quat_b.shape
     )
+    rotation_quat_b = _normalize_quaternion_sequence(rotation_quat_b)
 
     anchor_pos_w = np.empty((frame_count, len(ANCHOR_BODY_NAMES), 3), dtype=np.float32)
     for anchor_index, body_name in enumerate(ANCHOR_BODY_NAMES):
@@ -338,6 +355,7 @@ def _compute_fk(
         "link_quat_w": link_quat_w,
         "link_pos_b": link_pos_b,
         "link_quat_b": link_quat_b,
+        "rotation_quat_b": rotation_quat_b,
         "anchor_pos_w": anchor_pos_w,
         "anchor_pos_b": anchor_pos_b,
     }
@@ -372,6 +390,8 @@ def cache_is_current(
             and metadata["source_sha256"] == _sha256(source_path)
             and metadata["urdf_sha256"] == _sha256(urdf_path)
             and tuple(metadata["tracked_body_names"]) == tuple(tracked_body_names)
+            and tuple(zip(metadata["rotation_body_names"], metadata["rotation_body_weights"]))
+            == ROTATION_ONLY_TRACKING_BODIES
             and tuple(metadata["contact_names"]) == CONTACT_NAMES
         )
     except (KeyError, OSError, RuntimeError, TypeError, ValueError):
@@ -392,6 +412,11 @@ def preprocess_motion_batch(
     urdf_path = Path(urdf_path).resolve()
     output_path = Path(output_path).resolve()
     anchor_offsets = dict(DEFAULT_ANCHOR_OFFSETS if anchor_offsets is None else anchor_offsets)
+    rotation_body_names = tuple(name for name, _ in ROTATION_ONLY_TRACKING_BODIES)
+    if not rotation_body_names or len(set(rotation_body_names)) != len(rotation_body_names):
+        raise ValueError("Rotation-only tracking must contain unique body names.")
+    if any(weight <= 0.0 for _, weight in ROTATION_ONLY_TRACKING_BODIES):
+        raise ValueError("Rotation-only tracking weights must be positive.")
     if not source_path.is_file():
         raise FileNotFoundError(f"Trajectory file does not exist: {source_path}")
     if not urdf_path.is_file():
@@ -417,6 +442,7 @@ def preprocess_motion_batch(
             urdf_path,
             tuple(tracked_body_names),
             anchor_offsets,
+            rotation_body_names,
         )
         link_ang_vel = np.stack(
             [
@@ -458,6 +484,8 @@ def preprocess_motion_batch(
             "fps": 100.0,
             "dof_names": list(dof_names),
             "tracked_body_names": list(tracked_body_names),
+            "rotation_body_names": [name for name, _ in ROTATION_ONLY_TRACKING_BODIES],
+            "rotation_body_weights": [weight for _, weight in ROTATION_ONLY_TRACKING_BODIES],
             "anchor_body_names": list(ANCHOR_BODY_NAMES),
             "anchor_offsets": {key: list(value) for key, value in anchor_offsets.items()},
             "contact_names": list(CONTACT_NAMES),
