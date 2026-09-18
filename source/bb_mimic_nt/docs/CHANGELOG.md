@@ -58,3 +58,6 @@
 - add root-local link 旋转追踪. 加入 `torso` 管控; 增加对应数据处理缓存.
 - `PPO_STEPS_PER_ENV` 24 -> 96 显著提升 reward.
 - `init_noise_std` 0.4 -> 0.25 降低初始噪声.
+
+## 26-09-18_16-13
+- 修改 G1 PD 参数, 验证阻尼比, 相位裕度.
