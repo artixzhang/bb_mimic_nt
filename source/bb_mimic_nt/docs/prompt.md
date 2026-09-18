@@ -15,7 +15,7 @@
 
 ```Python
 Python 3.10.20 (main, Jun 11 2026, 15:17:37) [GCC 14.3.0] on linux
-Type "help", "copyright", "credits" or "license" for more information.
+Type "help`,  "copyright`,  "credits" or "license" for more information.
 >>> import joblib
 >>> data = joblib.load('shoot_dataset.pkl')
 >>> len(data)
@@ -161,3 +161,44 @@ termination项目包括:
 ## README
 
 说明功能, 设计, 以及使用方法.
+
+## TODO
+
+Student policy 额外需要实现: 
+- observation 噪声, 可控噪声强度.
+- observation 观测延迟.
+- 
+
+## Domain  Randomization
+
+请为当前框架添加统一的, 解耦的, 内聚的 DR 实现, 也就是 Domain Randomization. 不要到处写零散代码, 混在整个框架的各个位置, 要重点注意可维护性, 以及后续的复用便利性. 注意代码要保持简洁和可读, 不要临时性的注释.
+- 将所有的动力学 Domain Randomization 核心代码放到 `events.py` , 然后在需要的位置调用.
+- 执行延迟随机化直接写到 `actions.py` 中.
+- 修改对应的数据处理代码 `processing.py`.
+- 在 `observations.py` 中实现特权观测提取函数, 读取 context 中的特权参数并暴露给 Teacher Policy.
+
+本阶段训练的是 Teacher Policy, 需要设计如下项目的 Domain Randomization:
+- action 执行延迟. 离散档位: 共 5 个 step 档位 (对应 100Hz 下的 0, 1, 2, 3, 4 个 steps，即 0ms ~ 40ms). 观测映射: 标称 2 步映射为 0.0，[-1.0, -0.5, 0.0, 0.5, 1.0] 分别对应 0~4 步. 额外的一个 1-dim 作为观测输入给策略 observation, 代表延迟挡位, 同时实现对应的动作执行延迟逻辑, 对最终执行的动作进行延迟处理, 而不是对策略输出的动作延迟.
+- 动力学参数 DR: 篮球质量. 以默认参数作为均值, 映射到 0, 上下浮动 5% 映射到 [-1.0, 1.0], 作为额外的 1-dim observation.
+- 动力学参数 DR: PD控制器刚度. 以默认机器人配置为均值, 映射到 0, 同时调整刚度和阻尼, 根据阻尼比公式, 保持阻尼比不变. 即 $K_p = \alpha \cdot K_{p0},\ K_d = \sqrt{\alpha} \cdot K_{d0}$ . 上下浮动 10% 映射到 [-1.0, 1.0], 作为额外的 1-dim observation.
+- 动力学参数 DR: 手-球摩擦系数. 以 0.8 作为均值, 映射到 0, 上下浮动 [0.6, 1.0] 映射到 [-1.0, 1.0], 作为额外的 1-dim observation. 调整手部接触摩擦系数, 而不改篮球.
+- 动力学参数 DR: 脚-地摩擦系数. 以 0.9 作为均值, 映射到 0, 上下浮动 [0.6, 1.2] 映射到 [-1.0, 1.0], 作为额外的 1-dim observation. 调整脚部接触摩擦系数, 而不改地面.
+- 动力学参数 DR: link 质量. 以默认值作为均值, 映射到 0, 上下浮动 10%, 映射到 [-1.0, 1.0], 作为额外的 1-dim observation. 调节的 link 包括: `pelvis`, `left_hip_yaw_link`, `left_hip_roll_link`, `left_hip_pitch_link`, `left_knee_link`, `right_hip_yaw_link`, `right_hip_roll_link`, `right_hip_pitch_link`, `right_knee_link`. 9 个 link 共享比例, 作为额外的 1-dim observation.
+- 外部推力 DR: 向机器人的 `torso` link 施加随机推力于力矩. 没有额外的 observation. 作用力范围为 [-20.0, 20.0] N, 力矩范围为 [-3.0, 3.0] Nm. 用于训练的动作轨迹数据中已经新加入一个键值对 `["push_available", 0/1]`, 用于指示可以施加作用力的参考帧. 新动作轨迹文件为 `source/bb_mimic_nt/assets/trajectory/shoot_batch_0918.pkl`. 只有在轨迹数据对应的帧为可施加推力的时候才施加外部推力. 补齐对应的动作数据处理与缓存逻辑. 目前框架有对机器人的随机推动, 删除当前的零散代码, 统一整合到框架中.
+
+上述除推力外, 6 个 DR 项目各占 1 维, Teacher Policy 的 Observation 空间共计新增 6 维特权特征, 请在配置中正确扩展对应的 Observation 维度.
+
+在 reset 时,均匀采样需要随机化的值, 然后将其存入一个维护的 context 中, 在 env_cfg 中进行 DR 项目的配置, 运行时的 tensor buffer 存储在运行时环境对象中, 由 `actions.py` 和 `observations.py` 读取, 并执行对应的逻辑. 在单次 rollout (没有 timeout, 没有 termination) 过程中, 随机化的值保持固定, 只有当环境 reset 时, 才进行一次新的采样.
+
+DR 通过 Curriculum Learning 逐渐加入. 维护标准的 Curriculum Learning 变化模型, 如线性变化, 使得每个 DR 项目可以独立开关, 以及调整 Curriculum 过程.
+
+以下项目使用线性模型, 即开始完全关闭, 从训练 iterations 总数量的 20% 阶段开始线性逐渐放大采样范围, 到 60% 阶段采样全范围.
+- 动力学参数: 篮球质量
+- 动力学参数: PD 参数
+- 动力学参数: 手-球摩擦
+- 动力学参数: 脚-地摩擦
+- 动力学参数: link 质量
+- 外部推力
+- action 执行延迟: 开始采样到均值挡位, 也就是 2 个 step 延迟. (离散采样)
+
+修改完后, 请更新对应的 readme 文档以及更改记录 md 文档. 如有必须修改的文档和代码适配, 请一并修改.

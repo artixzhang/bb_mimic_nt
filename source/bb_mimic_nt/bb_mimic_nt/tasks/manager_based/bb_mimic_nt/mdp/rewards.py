@@ -139,7 +139,7 @@ class UnifiedRewardCfg:
     torque_weight: float = 0.005
     limit_weight: float = 0.05
     joint_velocity_error_weight: float = 0.001
-    regularization_clip: float = 1.0
+    regularization_clip: float = 0.5
     termination_penalty: float = 50.0
 
 
