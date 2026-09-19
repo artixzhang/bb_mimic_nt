@@ -12,15 +12,15 @@ from pathlib import Path
 from bb_mimic_nt.trajectory import preprocess_motion_batch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_INPUT = PROJECT_ROOT / "source/bb_mimic_nt/assets/trajectory/shoot_batch_0910.pkl"
-DEFAULT_OUTPUT = PROJECT_ROOT / "source/bb_mimic_nt/assets/trajectory/shoot_batch_0910_processed.pt"
+DEFAULT_INPUT = PROJECT_ROOT / "source/bb_mimic_nt/assets/trajectory/shoot_batch_0918.pkl"
+DEFAULT_OUTPUT = PROJECT_ROOT / "source/bb_mimic_nt/assets/trajectory/shoot_batch_0918_processed.pt"
 DEFAULT_URDF = PROJECT_ROOT / "source/bb_mimic_nt/assets/robots/g1/urdf/unitree_g1_bb.urdf"
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT, help="Raw joblib motion batch.")
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="Output MotionBatchV1 torch cache.")
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="Output torch motion cache.")
     parser.add_argument("--urdf", type=Path, default=DEFAULT_URDF, help="URDF used for forward kinematics.")
     parser.add_argument("--force", action="store_true", help="Rebuild even when the cache hash is current.")
     args = parser.parse_args()

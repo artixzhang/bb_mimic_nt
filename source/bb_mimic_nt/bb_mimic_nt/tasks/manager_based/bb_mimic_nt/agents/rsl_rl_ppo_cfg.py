@@ -11,12 +11,8 @@ class G1ShootPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = PPO_STEPS_PER_ENV
     max_iterations = PPO_MAX_ITERATIONS
     save_interval = 100
-    # Action semantics and observations changed in v2; keep incompatible v1
-    # checkpoints out of automatic discovery.
     experiment_name = "g1_shoot_teacher_v2"
     empirical_normalization = False
-    # The action term applies a smooth tanh bound.  Do not hard-clip Gaussian
-    # samples in the vector wrapper before they reach that transform.
     clip_actions = None
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=0.25,

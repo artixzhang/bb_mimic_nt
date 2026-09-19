@@ -10,6 +10,7 @@ import torch
 from isaaclab.utils.math import quat_apply_inverse, quat_inv, quat_mul
 
 from .commands import MotionReferenceCommand
+from .events import get_dr_context
 
 
 def motion_command(env, name: str = "motion") -> MotionReferenceCommand:
@@ -153,3 +154,7 @@ def phase(env) -> torch.Tensor:
 
 def reference_speed(env) -> torch.Tensor:
     return motion_command(env).speed.unsqueeze(-1)
+
+
+def dr_privileged_observation(env) -> torch.Tensor:
+    return get_dr_context(env).privileged

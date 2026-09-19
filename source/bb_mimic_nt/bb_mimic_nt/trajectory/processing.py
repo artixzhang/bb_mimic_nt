@@ -18,7 +18,7 @@ import joblib
 import numpy as np
 import torch
 
-CACHE_SCHEMA_VERSION = 2
+CACHE_SCHEMA_VERSION = 3
 
 TRACKED_BODY_NAMES = (
     "left_hand",
@@ -79,6 +79,7 @@ _REQUIRED_KEYS = {
     "obj_pos",
     "obj_rot",
     "contact",
+    "push_available",
     "contact_names",
     "fps",
     "dof_names",
@@ -208,6 +209,7 @@ def _validate_clip(clip: dict[str, Any], clip_index: int) -> None:
         "obj_pos": (frame_count, 3),
         "obj_rot": (frame_count, 4),
         "contact": (frame_count, 4),
+        "push_available": (frame_count,),
         "hoop_pos_w": (3,),
     }
     if frame_count < 2:
@@ -238,6 +240,9 @@ def _validate_clip(clip: dict[str, Any], clip_index: int) -> None:
     contacts = np.asarray(clip["contact"])
     if not np.all(np.logical_or(np.isclose(contacts, 0.0), np.isclose(contacts, 1.0))):
         raise ValueError(f"Clip {clip_index} contact labels must be binary.")
+    push_available = np.asarray(clip["push_available"])
+    if not np.all(np.logical_or(push_available == 0.0, push_available == 1.0)):
+        raise ValueError(f"Clip {clip_index} push_available labels must be binary.")
 
     for field in ("root_rot", "obj_rot"):
         norms = np.linalg.norm(np.asarray(clip[field], dtype=np.float64), axis=-1)
@@ -387,6 +392,8 @@ def cache_is_current(
         metadata = cache["metadata"]
         return bool(
             metadata["schema_version"] == CACHE_SCHEMA_VERSION
+            and "push_available" in cache
+            and cache["push_available"].shape == cache["valid"].shape
             and metadata["source_sha256"] == _sha256(source_path)
             and metadata["urdf_sha256"] == _sha256(urdf_path)
             and tuple(metadata["tracked_body_names"]) == tuple(tracked_body_names)
@@ -464,6 +471,7 @@ def preprocess_motion_batch(
                 "object_lin_vel": finite_difference(object_pos, dt),
                 "object_ang_vel": quaternion_angular_velocity(object_quat, dt),
                 "contact": contact,
+                "push_available": np.asarray(clip["push_available"], dtype=np.float32),
                 "hoop_pos": np.repeat(np.asarray(clip["hoop_pos_w"], dtype=np.float32)[None], len(root_pos), axis=0),
                 "link_lin_vel_w": finite_difference(fk["link_pos_w"], dt),
                 "link_ang_vel_w": link_ang_vel,
@@ -503,6 +511,7 @@ def preprocess_motion_batch(
         "object_ang_vel",
         "link_lin_vel_w",
         "link_ang_vel_w",
+        "push_available",
     }
     for field in processed[0]:
         cache[field] = _make_padded_tensor(
@@ -525,4 +534,6 @@ def load_motion_batch(
             f"Unsupported motion cache schema: {cache.get('metadata', {}).get('schema_version')}; "
             f"expected {CACHE_SCHEMA_VERSION}."
         )
+    if "push_available" not in cache or cache["push_available"].shape != cache["valid"].shape:
+        raise ValueError("Motion cache has no valid push_available field.")
     return cache

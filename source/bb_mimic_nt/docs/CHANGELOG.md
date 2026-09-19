@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-09-19 — 关节 jerk 与分轴推力
+
+- 统一奖励增加逐环境关节 jerk 正则，reset 后前两步不计罚；`torso_link` 推力改为 X/Y 各 ±200 N、Z ±50 N 的独立采样范围。
+
+## 2026-09-18 — Teacher Domain Randomization
+
+- 增加统一的 reset DR context 和七项可独立配置的线性课程；训练 CLI 与恢复训练的 iteration 用于课程进度。
+- 最终 PD 目标增加 0–4 步执行延迟；篮球质量、PD 刚度与阻尼、手/脚摩擦、九个 link 质量按环境随机化。
+- 轨迹改用 `shoot_batch_0918.pkl`，缓存 schema 增加逐帧 `push_available`；原速度推动改为受标记约束的 `torso_link` 200 ms 三轴力与力矩脉冲。
+- Teacher observation 增加六维归一化特权参数至 479 维，实验目录改为 `g1_shoot_teacher_v3`，旧 checkpoint 不兼容。
+
 ## v0.3.0 — 2026-09-11
 
 - 将整段关节限位的绝对 action 改为 reference-relative residual PD target；policy 输出使用平滑 `tanh` 边界，并只对反馈 residual 使用 40 ms 一阶低通。

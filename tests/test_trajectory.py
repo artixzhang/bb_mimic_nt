@@ -1,7 +1,7 @@
 # Copyright (c) 2022-2025, The Isaac Lab Project Developers.
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""MotionBatchV1 validation, kinematics, interpolation inputs, and cache tests."""
+"""Motion validation, kinematics, interpolation inputs, and cache tests."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from bb_mimic_nt.trajectory import (
     TRACKED_BODY_NAMES,
     cache_is_current,
     load_motion_batch,
+    preprocess_motion_batch,
     reorder_clip_channels,
 )
 from bb_mimic_nt.trajectory.processing import (
@@ -35,14 +36,15 @@ from bb_mimic_nt.trajectory.processing import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ASSET_ROOT = PROJECT_ROOT / "source/bb_mimic_nt/assets"
-SOURCE = ASSET_ROOT / "trajectory/shoot_batch_0910.pkl"
-CACHE = ASSET_ROOT / "trajectory/shoot_batch_0910_processed.pt"
+SOURCE = ASSET_ROOT / "trajectory/shoot_batch_0918.pkl"
 URDF = ASSET_ROOT / "robots/g1/urdf/unitree_g1_bb.urdf"
 
 
-def test_real_batch_validation_contact_reordering_padding_and_hashes() -> None:
+def test_real_batch_validation_contact_reordering_padding_and_hashes(tmp_path: Path) -> None:
     raw, dof_names = validate_motion_batch(joblib.load(SOURCE))
-    cache = load_motion_batch(CACHE)
+    cache_path = tmp_path / "motion.pt"
+    preprocess_motion_batch(SOURCE, URDF, cache_path)
+    cache = load_motion_batch(cache_path)
     assert len(raw) == 100
     assert len(dof_names) == 29
     assert dof_names == EXPECTED_DOF_NAMES
@@ -52,18 +54,21 @@ def test_real_batch_validation_contact_reordering_padding_and_hashes() -> None:
     )
     assert cache["rotation_quat_b"].shape[-2:] == (len(ROTATION_ONLY_TRACKING_BODIES), 4)
     assert tuple(cache["metadata"]["contact_names"]) == CONTACT_NAMES
-    assert cache_is_current(CACHE, SOURCE, URDF)
+    assert cache_is_current(cache_path, SOURCE, URDF)
     assert cache["anchor_pos_b"].shape[-2:] == (2, 3)
+    assert cache["push_available"].shape == cache["valid"].shape
 
     length = int(cache["lengths"][0])
     source_indices = [tuple(raw[0]["contact_names"]).index(name) for name in CONTACT_NAMES]
     assert np.array_equal(cache["contact"][0, :length].numpy(), np.asarray(raw[0]["contact"])[:, source_indices])
+    assert np.array_equal(cache["push_available"][0, :length].numpy(), np.asarray(raw[0]["push_available"]))
     assert torch.all(cache["valid"][0, :length])
     assert not torch.any(cache["valid"][0, length:])
     if length < cache["valid"].shape[1]:
         expected_padding = cache["root_pos"][0, length - 1].expand_as(cache["root_pos"][0, length:])
         assert torch.equal(cache["root_pos"][0, length:], expected_padding)
         assert torch.count_nonzero(cache["root_lin_vel"][0, length:]) == 0
+        assert torch.count_nonzero(cache["push_available"][0, length:]) == 0
 
 
 def test_invalid_fps_and_quaternion_are_rejected() -> None:
@@ -74,6 +79,16 @@ def test_invalid_fps_and_quaternion_are_rejected() -> None:
     clip["fps"] = 100
     clip["root_rot"][0] = 0.0
     with pytest.raises(ValueError, match="non-normalized"):
+        validate_motion_batch([clip])
+
+
+def test_push_available_requires_one_binary_value_per_frame() -> None:
+    clip = copy.deepcopy(joblib.load(SOURCE)[0])
+    clip["push_available"] = clip["push_available"][:-1]
+    with pytest.raises(ValueError, match="push_available.*shape"):
+        validate_motion_batch([clip])
+    clip["push_available"] = np.full(len(clip["root_pos"]), 0.5, dtype=np.float32)
+    with pytest.raises(ValueError, match="push_available labels must be binary"):
         validate_motion_batch([clip])
 
 
@@ -170,7 +185,9 @@ def test_cache_hash_invalidation(tmp_path: Path) -> None:
                 "rotation_body_names": [name for name, _ in ROTATION_ONLY_TRACKING_BODIES],
                 "rotation_body_weights": [weight for _, weight in ROTATION_ONLY_TRACKING_BODIES],
                 "contact_names": list(CONTACT_NAMES),
-            }
+            },
+            "push_available": torch.zeros(1, 1),
+            "valid": torch.ones(1, 1, dtype=torch.bool),
         },
         cache_path,
     )

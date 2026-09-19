@@ -19,6 +19,7 @@ from bb_mimic_nt.core import (
     clipped_regularization,
     gated_top_level_reward,
     gaussian,
+    joint_jerk_cost,
     normalized_weighted_sum,
     rational_kernel,
 )
@@ -139,11 +140,14 @@ class UnifiedRewardCfg:
     torque_weight: float = 0.005
     limit_weight: float = 0.05
     joint_velocity_error_weight: float = 0.001
+    joint_jerk_weight: float = 2.0e-10
     regularization_clip: float = 0.5
     termination_penalty: float = 50.0
 
 
-def regularization_cost(term: MotionReferenceCommand, settings: UnifiedRewardCfg, env) -> dict[str, torch.Tensor]:
+def regularization_cost(
+    term: MotionReferenceCommand, settings: UnifiedRewardCfg, env, joint_jerk: torch.Tensor
+) -> dict[str, torch.Tensor]:
     robot = term.robot
     joint_ids = term.joint_ids
     action_term = env.action_manager.get_term("joint_pos")
@@ -178,6 +182,7 @@ def regularization_cost(term: MotionReferenceCommand, settings: UnifiedRewardCfg
             torque_cost,
             limit_cost,
             joint_velocity_error,
+            joint_jerk,
         ),
         (
             settings.action_magnitude_weight,
@@ -186,6 +191,7 @@ def regularization_cost(term: MotionReferenceCommand, settings: UnifiedRewardCfg
             settings.torque_weight,
             settings.limit_weight,
             settings.joint_velocity_error_weight,
+            settings.joint_jerk_weight,
         ),
         settings.regularization_clip,
     )
@@ -196,6 +202,7 @@ def regularization_cost(term: MotionReferenceCommand, settings: UnifiedRewardCfg
         "reg/torque": torque_cost,
         "reg/limit": limit_cost,
         "reg/joint_velocity_error": joint_velocity_error,
+        "reg/joint_jerk": joint_jerk,
         "reg/total": weighted,
     }
 
@@ -206,6 +213,28 @@ class UnifiedMimicReward(ManagerTermBase):
     def __init__(self, cfg, env):
         super().__init__(cfg, env)
         self._episode_sums: dict[str, torch.Tensor] = {}
+        self._previous_joint_velocity: torch.Tensor | None = None
+        self._previous_joint_acceleration: torch.Tensor | None = None
+        self._joint_history_length = torch.zeros(self.num_envs, dtype=torch.uint8, device=self.device)
+
+    def _joint_jerk(self, velocity: torch.Tensor) -> torch.Tensor:
+        if self._previous_joint_velocity is None:
+            with torch.inference_mode(False):
+                self._previous_joint_velocity = torch.zeros_like(velocity)
+                self._previous_joint_acceleration = torch.zeros_like(velocity)
+        cost, acceleration = joint_jerk_cost(
+            velocity,
+            self._previous_joint_velocity,
+            self._previous_joint_acceleration,
+            self._joint_history_length,
+            self._env.step_dt,
+        )
+        self._previous_joint_velocity.copy_(velocity)
+        self._previous_joint_acceleration.copy_(
+            torch.where(self._joint_history_length[:, None] > 0, acceleration, 0.0)
+        )
+        self._joint_history_length.add_(1).clamp_(max=2)
+        return cost
 
     def _record(self, values: dict[str, torch.Tensor]) -> None:
         for name, value in values.items():
@@ -220,6 +249,7 @@ class UnifiedMimicReward(ManagerTermBase):
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
         if env_ids is None:
             env_ids = slice(None)
+        self._joint_history_length[env_ids] = 0
         duration = (
             self._env.episode_length_buf[env_ids].float() * self._env.step_dt
         ).clamp_min(self._env.step_dt)
@@ -327,7 +357,8 @@ class UnifiedMimicReward(ManagerTermBase):
             term.object_reward_active.float(),
             settings.global_weights,
         )
-        regularization = regularization_cost(term, settings, env)
+        joint_jerk = self._joint_jerk(robot.data.joint_vel[:, term.joint_ids])
+        regularization = regularization_cost(term, settings, env, joint_jerk)
         termination = env.termination_manager.terminated.float() * settings.termination_penalty
         total = torch.nan_to_num(
             mimic - regularization["reg/total"] - termination,

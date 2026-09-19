@@ -17,6 +17,7 @@ from bb_mimic_nt.core import (
     downward_hoop_crossing,
     gated_top_level_reward,
     interpolate_motion,
+    joint_jerk_cost,
     normalized_weighted_sum,
     rational_kernel,
     reference_residual_target,
@@ -39,6 +40,23 @@ def test_reference_residual_action_target_limits() -> None:
     assert rational_kernel(torch.tensor([0.0, 4.0]), 0.5).tolist() == pytest.approx([1.0, 1.0 / 3.0])
 
 
+def test_joint_jerk_penalizes_velocity_reversal_after_two_samples() -> None:
+    dt = 0.01
+    previous_velocity = torch.tensor([[1.0], [1.0]])
+    previous_acceleration = torch.tensor([[100.0], [100.0]])
+    velocity = torch.tensor([[2.0], [0.0]])
+    cost, acceleration = joint_jerk_cost(
+        velocity, previous_velocity, previous_acceleration, torch.tensor([2, 2]), dt
+    )
+    assert torch.allclose(acceleration, torch.tensor([[100.0], [-100.0]]))
+    assert cost[0] == pytest.approx(0.0)
+    assert cost[1] == pytest.approx(4.0e8)
+    startup_cost, _ = joint_jerk_cost(
+        velocity, previous_velocity, previous_acceleration, torch.tensor([1, 0]), dt
+    )
+    assert torch.equal(startup_cost, torch.zeros(2))
+
+
 def test_rsi_schedule_uses_central_training_length() -> None:
     assert RSI_DECAY_STEPS == int(PPO_STEPS_PER_ENV * PPO_MAX_ITERATIONS * 0.30)
     assert rsi_probability(0, RSI_DECAY_STEPS) == pytest.approx(0.8)
@@ -47,12 +65,12 @@ def test_rsi_schedule_uses_central_training_length() -> None:
     assert rsi_probability(RSI_DECAY_STEPS * 2, RSI_DECAY_STEPS) == 0.0
 
 
-def test_teacher_observation_contract_is_473() -> None:
+def test_teacher_observation_contract_is_479() -> None:
     current = 3 + 1 + 4 + 3 + 3 + 29 + 29 + 12 + 3 + 3 + 3 + 29 + 29
     reference = 3 + 4 + 29 + 12 + 3 + 29 + 12 + 3 + 3 + 3 + 29 + 3 + 4
     history = 3 * (3 + 29 + 29)
     assert (current, reference, history) == (151, 137, 183)
-    assert current + reference + history + 2 == TEACHER_OBSERVATION_DIM
+    assert current + reference + history + 2 + 6 == TEACHER_OBSERVATION_DIM
 
 
 def test_adaptive_speed_levels_are_monotonic() -> None:

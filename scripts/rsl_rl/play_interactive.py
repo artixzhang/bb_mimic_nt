@@ -90,7 +90,7 @@ def main(env_cfg, agent_cfg):
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
     env_cfg.scene.num_envs = 100 if args_cli.all_clips else max(1, args_cli.num_envs)
     env_cfg.commands.motion.enable_rsi = False
-    env_cfg.commands.motion.enable_push = False
+    env_cfg.dr.push.enabled = False
     env_cfg.observations.policy.enable_corruption = False
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     if args_cli.ignore_failures:

@@ -9,6 +9,7 @@ from bb_mimic_nt.training import TEACHER_OBSERVATION_DIM
 
 from .commands import MotionReferenceCommand, rsi_probability
 from .contacts import CONTACT_SENSOR_NAMES
+from .events import curriculum_strength, get_dr_context, training_policy_steps
 
 
 def rsi_curriculum(env, env_ids, command_name: str = "motion") -> dict[str, float]:
@@ -31,8 +32,17 @@ def rsi_curriculum(env, env_ids, command_name: str = "motion") -> dict[str, floa
     probability = 0.0
     if term.cfg.enable_rsi:
         probability = rsi_probability(
-            env.common_step_counter,
+            training_policy_steps(env),
             term.cfg.rsi_decay_steps,
             term.cfg.rsi_initial_probability,
         )
     return {"probability": probability}
+
+
+def dr_curriculum(env, env_ids) -> dict[str, float]:
+    cfg = env.cfg.dr
+    iteration = get_dr_context(env).iteration_offset + env.common_step_counter / cfg.steps_per_iteration
+    return {
+        name: curriculum_strength(getattr(cfg, name), iteration, cfg.total_iterations)
+        for name in ("delay", "ball_mass", "pd_gains", "hand_friction", "foot_friction", "link_mass", "push")
+    }

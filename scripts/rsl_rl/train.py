@@ -97,6 +97,7 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import bb_mimic_nt.tasks  # noqa: F401
+from bb_mimic_nt.training import RSI_DECAY_FRACTION
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -113,6 +114,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     agent_cfg.max_iterations = (
         args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
     )
+    if isinstance(env_cfg, ManagerBasedRLEnvCfg) and hasattr(env_cfg, "dr"):
+        env_cfg.dr.total_iterations = agent_cfg.max_iterations
+        env_cfg.dr.steps_per_iteration = agent_cfg.num_steps_per_env
+        env_cfg.commands.motion.rsi_decay_steps = int(
+            agent_cfg.max_iterations * agent_cfg.num_steps_per_env * RSI_DECAY_FRACTION
+        )
 
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here
@@ -161,6 +168,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+    base_env = env.unwrapped
 
     # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv):
@@ -199,6 +207,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         # load previously trained model
         runner.load(resume_path)
+        if hasattr(base_env.cfg, "dr"):
+            completed = runner.current_learning_iteration
+            base_env.cfg.dr.total_iterations = completed + agent_cfg.max_iterations
+            base_env.cfg.commands.motion.rsi_decay_steps = int(
+                base_env.cfg.dr.total_iterations * agent_cfg.num_steps_per_env * RSI_DECAY_FRACTION
+            )
+            base_env.dr_context.iteration_offset = completed
+            base_env.reset()
 
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)

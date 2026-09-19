@@ -149,6 +149,19 @@ def clipped_regularization(
     return sum(cost * weight for cost, weight in zip(costs, weights)).clamp_max(maximum)
 
 
+def joint_jerk_cost(
+    velocity: torch.Tensor,
+    previous_velocity: torch.Tensor,
+    previous_acceleration: torch.Tensor,
+    history_length: torch.Tensor,
+    dt: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    acceleration = (velocity - previous_velocity) / dt
+    jerk = (acceleration - previous_acceleration) / dt
+    cost = torch.where(history_length >= 2, torch.mean(jerk.square(), dim=-1), 0.0)
+    return cost, acceleration
+
+
 def downward_hoop_crossing(
     previous_height: torch.Tensor,
     ball_position: torch.Tensor,

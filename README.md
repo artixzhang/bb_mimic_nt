@@ -1,19 +1,19 @@
 # BB Mimic NT：Unitree G1 跳跃投篮 Teacher Policy
 
-本项目在 Isaac Lab 2.3 / Isaac Sim 5.1 中实现 G1–篮球–篮筐的 manager-based PPO 模仿环境。v0.3.0 只包含 Teacher policy：100 条定点跳跃投篮轨迹均匀混训，不包含 AMP、Student 蒸馏、XGen 或真机部署。
+本项目在 Isaac Lab 2.3 / Isaac Sim 5.1 中实现 G1–篮球–篮筐的 manager-based PPO 模仿环境。当前只包含 Teacher policy：100 条定点跳跃投篮轨迹均匀混训，不包含 AMP、Student 蒸馏、XGen 或真机部署。
 
 ## 环境与数据
 
 - 训练环境：`BbMimicNT-G1-Shoot-v0`
 - 确定性播放环境：`BbMimicNT-G1-Shoot-Play-v0`
 - 仿真 / 策略频率：200 Hz / 100 Hz（decimation 2）
-- 动作：29 维 reference-relative PD residual；Gaussian policy 输出经 `tanh` 平滑约束，反馈 residual 使用 40 ms 一阶低通，目标限制在机械关节限位内，并按 reference/执行器速度上限限制每步变化；reference pose 本身不经过低通
-- Teacher observation：固定 473 维，包含当前状态、reference pose/velocity/contact、历史、phase 与 reference speed
-- 原始轨迹：`source/bb_mimic_nt/assets/trajectory/shoot_batch_0910.pkl`
-- 预处理缓存：同目录 `shoot_batch_0910_processed.pt`（自动生成并被 Git 忽略）
+- 动作：29 维 reference-relative PD residual；Gaussian policy 输出经 `tanh` 约束，最终 PD 目标限制在机械关节限位内，再按每环境 0–4 个策略步延迟执行
+- Teacher observation：固定 479 维，包含当前状态、reference pose/velocity/contact、历史、phase、reference speed 和 6 维 DR 特权参数
+- 原始轨迹：`source/bb_mimic_nt/assets/trajectory/shoot_batch_0918.pkl`
+- 预处理缓存：同目录 `shoot_batch_0918_processed.pt`（自动生成并被 Git 忽略）
 - 场景资产配置：`source/bb_mimic_nt/bb_mimic_nt/objects/`；环境直接复用其中的篮球、floating hoop 和地面配置
 
-轨迹被解释为每个并行环境自己的 local-world 坐标；写入仿真时才叠加 env origin。缓存包含 schema、源文件与 URDF 哈希、有效长度、padding mask、29 DoF、四路 contact、FK link / hand anchor 及差分速度。哈希或 schema 过期时，训练会自动重建。
+轨迹被解释为每个并行环境自己的 local-world 坐标；写入仿真时才叠加 env origin。缓存包含 schema、源文件与 URDF 哈希、有效长度、padding mask、29 DoF、四路 contact、逐帧 `push_available`、FK link / hand anchor 及差分速度。哈希或 schema 过期时，训练会自动重建。
 
 ## 安装与预处理
 
@@ -28,16 +28,14 @@ python scripts/preprocess_trajectory.py
 
 ```bash
 python scripts/preprocess_trajectory.py \
-  --input source/bb_mimic_nt/assets/trajectory/shoot_batch_0910.pkl \
-  --output source/bb_mimic_nt/assets/trajectory/shoot_batch_0910_processed.pt \
+  --input source/bb_mimic_nt/assets/trajectory/shoot_batch_0918.pkl \
+  --output source/bb_mimic_nt/assets/trajectory/shoot_batch_0918_processed.pt \
   --force
 ```
 
 ## 训练
 
-默认使用 4096 个环境、每次 rollout 24 步、3000 次 PPO iteration。RSI 概率按共享配置在前 30% policy steps 从 0.8 线性降到 0。
-
-v0.3.0 改变了 action 语义和 observation 维数，不能加载 v0.2.0 的 checkpoint。新训练与自动播放使用独立的 `logs/rsl_rl/g1_shoot_teacher_v2`，必须重新训练。
+默认使用 4096 个环境、每次 rollout 96 步、5000 次 PPO iteration。RSI 概率在前 30% policy steps 从 0.8 线性降到 0。
 
 ```bash
 python scripts/rsl_rl/train.py \
@@ -53,9 +51,27 @@ python scripts/rsl_rl/train.py \
   --num_envs 8 --max_iterations 2 --headless
 ```
 
-`training.py` 是 PPO rollout/iteration 与 RSI decay steps 的单一配置源。若要永久修改训练长度，请同步修改其中的 `PPO_MAX_ITERATIONS`；CLI 的临时 `--max_iterations` 不会重写环境构造时已确定的 RSI 日程。
+`training.py` 提供 PPO rollout 与 iteration 的默认值。训练入口把实际 `--max_iterations` 和 `num_steps_per_env` 写入 DR 与 RSI 课程；恢复训练时从 checkpoint iteration 接续。
+
+## Domain Randomization
+
+每次环境 reset 独立采样，直到下次 reset 保持不变。`env_cfg.dr` 为七项 DR 分别提供 `enabled`、`start_fraction` 和 `end_fraction`，并集中配置标称值、采样幅度和推力持续时间；默认在训练进度 20% 前使用标称值，20%–60% 线性扩大范围。六维特权观测依次为延迟、篮球质量、PD 比例、手部摩擦、脚部摩擦、腿部及骨盆 link 质量比例，按完整范围映射到 [-1, 1]，标称值均为 0。
+
+| 项目 | 标称值 | 完整采样范围 |
+| --- | ---: | ---: |
+| 最终 PD 目标执行延迟 | 2 个 100 Hz 步 | 0–4 步，观测为 `(steps-2)/2` |
+| 篮球质量 | USD 默认质量 | 默认值 ±5% |
+| 29 个关节的 PD 刚度 | 机器人默认值 | `Kp` 比例 ±10%，`Kd` 比例为其平方根 |
+| 双手静、动摩擦 | 0.8 | 0.6–1.0 |
+| 双脚静、动摩擦 | 0.9 | 0.6–1.2 |
+| 骨盆及八个髋/膝 link 质量 | 各 link 默认质量 | 共用比例 ±10%，惯量同比例变化 |
+| `torso_link` 外力和力矩 | 0 | 世界坐标 X/Y 各 ±200 N、Z ±50 N，力矩各轴 ±3 Nm；最长 200 ms |
+
+外力每次 rollout 最多触发一次，起点从当前 RSI 帧之后的 `push_available=1` 参考帧均匀选取。标记变为 0 时立即停止脉冲。播放和评估关闭随机化及外力，保留固定 2 步执行延迟。
 
 TensorBoard 除 reward/termination 外，还记录 `Metrics/motion/error/*` 的原始 reference tracking error，以及 `Metrics/motion/control/*` 的 action 变化、PD target 变化、action 饱和率、关节速度和力矩占比。这些指标带有物理单位，适合排查 reward 上升但动作抖动的问题。
+
+`reg/joint_jerk` 根据连续三个 100 Hz 策略步的关节速度计算加速度变化率，reset 后前两步不计罚。默认权重为 `2e-10`，训练时可通过 `Reward/reg/joint_jerk` 监控原始代价。
 
 ## 播放、交互与评估
 

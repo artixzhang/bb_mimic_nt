@@ -12,6 +12,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import CurriculumTermCfg as CurrTerm
+from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
@@ -28,16 +29,50 @@ from bb_mimic_nt.objects import (
     BB_HOOP_ROOT_ROTATION,
 )
 from bb_mimic_nt.robots.unitree_g1_bb import G1_BB_CFG, G1Constants
-from bb_mimic_nt.training import RSI_DECAY_STEPS
+from bb_mimic_nt.training import PPO_MAX_ITERATIONS, PPO_STEPS_PER_ENV, RSI_DECAY_STEPS
 
 from . import mdp
 
 
 EXTENSION_ROOT = Path(__file__).resolve().parents[4]
 ASSET_ROOT = EXTENSION_ROOT / "assets"
-MOTION_SOURCE = ASSET_ROOT / "trajectory" / "shoot_batch_0910.pkl"
-MOTION_CACHE = ASSET_ROOT / "trajectory" / "shoot_batch_0910_processed.pt"
+MOTION_SOURCE = ASSET_ROOT / "trajectory" / "shoot_batch_0918.pkl"
+MOTION_CACHE = ASSET_ROOT / "trajectory" / "shoot_batch_0918_processed.pt"
 ROBOT_URDF = ASSET_ROOT / "robots" / "g1" / "urdf" / "unitree_g1_bb.urdf"
+
+
+@configclass
+class DRScheduleCfg:
+    enabled: bool = True
+    start_fraction: float = 0.20
+    end_fraction: float = 0.60
+
+
+@configclass
+class DomainRandomizationCfg:
+    total_iterations: int = PPO_MAX_ITERATIONS
+    steps_per_iteration: int = PPO_STEPS_PER_ENV
+    delay_nominal_steps: int = 2
+    delay_max_offset_steps: int = 2
+    ball_mass_fraction: float = 0.05
+    pd_gain_fraction: float = 0.10
+    hand_friction_nominal: float = 0.8
+    hand_friction_delta: float = 0.2
+    foot_friction_nominal: float = 0.9
+    foot_friction_delta: float = 0.3
+    link_mass_fraction: float = 0.10
+    push_force_max_n: tuple[float, float, float] = (200.0, 200.0, 50.0)
+    push_torque_max_nm: float = 3.0
+    push_duration_s: float = 0.20
+    delay: DRScheduleCfg = DRScheduleCfg()
+    ball_mass: DRScheduleCfg = DRScheduleCfg()
+    pd_gains: DRScheduleCfg = DRScheduleCfg()
+    hand_friction: DRScheduleCfg = DRScheduleCfg()
+    foot_friction: DRScheduleCfg = DRScheduleCfg()
+    link_mass: DRScheduleCfg = DRScheduleCfg()
+    push: DRScheduleCfg = DRScheduleCfg()
+
+
 @configclass
 class G1ShootSceneCfg(InteractiveSceneCfg):
     """G1, dynamic basketball, kinematic hoop, and filtered contacts."""
@@ -97,7 +132,7 @@ class ActionsCfg:
 
 @configclass
 class ObservationsCfg:
-    """The concatenated Teacher observation has exactly 473 scalars."""
+    """The concatenated Teacher observation has exactly 479 scalars."""
 
     @configclass
     class PolicyCfg(ObsGroup):
@@ -138,6 +173,7 @@ class ObservationsCfg:
         action_history = ObsTerm(func=mdp.previous_action, history_length=3)
         phase = ObsTerm(func=mdp.phase)
         reference_speed = ObsTerm(func=mdp.reference_speed)
+        domain_randomization = ObsTerm(func=mdp.dr_privileged_observation)
 
         def __post_init__(self) -> None:
             self.enable_corruption = False
@@ -179,13 +215,18 @@ class TerminationsCfg:
 @configclass
 class CurriculumCfg:
     rsi = CurrTerm(func=mdp.rsi_curriculum, params={"command_name": "motion"})
+    domain_randomization = CurrTerm(func=mdp.dr_curriculum)
 
 
 @configclass
 class EventsCfg:
-    """No generic reset/interval randomization; motion reset owns task state."""
-
-    pass
+    randomize = EventTerm(func=mdp.reset_domain_randomization, mode="reset")
+    push = EventTerm(
+        func=mdp.advance_push_pulse,
+        mode="interval",
+        interval_range_s=(0.01, 0.01),
+        is_global_time=True,
+    )
 
 
 @configclass
@@ -198,6 +239,7 @@ class G1ShootEnvCfg(ManagerBasedRLEnvCfg):
     terminations: TerminationsCfg = TerminationsCfg()
     curriculum: CurriculumCfg = CurriculumCfg()
     events: EventsCfg = EventsCfg()
+    dr: DomainRandomizationCfg = DomainRandomizationCfg()
 
     def __post_init__(self) -> None:
         self.decimation = 2
@@ -209,6 +251,7 @@ class G1ShootEnvCfg(ManagerBasedRLEnvCfg):
         self.viewer.lookat = (1.0, 0.0, 1.5)
         self.sim.dt = 1.0 / 200.0
         self.sim.render_interval = self.decimation
+        self.events.push.interval_range_s = (self.decimation * self.sim.dt,) * 2
         # Isaac Sim exposes CCD at scene level; this protects the fast ball.
         self.sim.physx.enable_ccd = True
         self.sim.physx.bounce_threshold_velocity = 0.2
@@ -223,6 +266,7 @@ class G1ShootPlayEnvCfg(G1ShootEnvCfg):
         self.scene.num_envs = 1
         self.observations.policy.enable_corruption = False
         self.commands.motion.enable_rsi = False
-        self.commands.motion.enable_push = False
         self.commands.motion.randomize_clip = False
         self.commands.motion.enable_adaptive_speed = True
+        for name in ("delay", "ball_mass", "pd_gains", "hand_friction", "foot_friction", "link_mass", "push"):
+            getattr(self.dr, name).enabled = False

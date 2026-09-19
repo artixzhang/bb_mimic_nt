@@ -15,11 +15,19 @@ from isaaclab.utils import configclass
 
 from bb_mimic_nt.core import reference_residual_target
 
+from .events import get_dr_context
+
+
+def delayed_target(history: torch.Tensor, cursor: int, delay_steps: torch.Tensor) -> torch.Tensor:
+    """Select the final target delayed by each environment's policy-step count."""
+    indices = (cursor - delay_steps) % history.shape[0]
+    return history[indices, torch.arange(history.shape[1], device=history.device)]
+
 
 class ReferenceResidualJointPositionAction(ActionTerm):
     """Apply a bounded residual around the current motion reference.
 
-    A zero policy action follows the reference joint pose.  The policy only
+    A zero policy action requests the reference joint pose. The policy only
     learns the feedback correction required by physics and ball interaction,
     rather than reconstructing the entire feed-forward motion through a very
     large absolute action range.
@@ -53,6 +61,9 @@ class ReferenceResidualJointPositionAction(ActionTerm):
         self._previous_desired_actions = torch.zeros_like(self._raw_actions)
         self._reference_positions = torch.zeros_like(self._raw_actions)
         self._previous_reference_positions = torch.zeros_like(self._raw_actions)
+        history_length = env.cfg.dr.delay_nominal_steps + env.cfg.dr.delay_max_offset_steps + 1
+        self._target_history = torch.zeros((history_length, self.num_envs, len(self._joint_ids)), device=self.device)
+        self._history_cursor = -1
         self._nominal = self._asset.data.default_joint_pos[:, self._joint_ids].clone()
         limits = self._asset.data.joint_pos_limits[:, self._joint_ids]
         self._lower = (limits[..., 0] + cfg.position_limit_margin).clone()
@@ -78,6 +89,7 @@ class ReferenceResidualJointPositionAction(ActionTerm):
             min=cfg.minimum_residual_scale,
             max=cfg.maximum_residual_scale,
         )
+        self._dr_context = get_dr_context(env)
         self.synchronize_reference()
 
     @property
@@ -94,7 +106,7 @@ class ReferenceResidualJointPositionAction(ActionTerm):
 
     @property
     def processed_actions(self) -> torch.Tensor:
-        # Required by Isaac Lab's ActionTerm; the bounded target is applied directly.
+        # Required by Isaac Lab's ActionTerm; this is the target selected for execution.
         return self._desired_actions
 
     @property
@@ -126,12 +138,17 @@ class ReferenceResidualJointPositionAction(ActionTerm):
         # +/-1 while preserving a bounded residual command.
         self._raw_actions[:] = torch.tanh(actions)
         self._reference_positions[:] = self._command.reference["dof_pos"]
-        self._desired_actions[:] = reference_residual_target(
+        current_target = reference_residual_target(
             self._raw_actions,
             self._reference_positions,
             self._residual_scale,
             self._lower,
             self._upper,
+        )
+        self._history_cursor = (self._history_cursor + 1) % self._target_history.shape[0]
+        self._target_history[self._history_cursor] = current_target
+        self._desired_actions[:] = delayed_target(
+            self._target_history, self._history_cursor, self._dr_context.delay_steps
         )
 
     def apply_actions(self) -> None:
@@ -156,6 +173,7 @@ class ReferenceResidualJointPositionAction(ActionTerm):
         self._previous_reference_positions[env_ids] = reference
         self._desired_actions[env_ids] = reference
         self._previous_desired_actions[env_ids] = reference
+        self._target_history[:, env_ids] = reference
 
 
 @configclass

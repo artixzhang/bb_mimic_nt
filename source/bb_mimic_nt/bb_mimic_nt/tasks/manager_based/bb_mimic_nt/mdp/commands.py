@@ -34,6 +34,7 @@ from bb_mimic_nt.trajectory import (
 )
 
 from .contacts import contact_graph
+from .events import arm_push, training_policy_steps
 
 STAGE_PRE_HOLD = 0
 STAGE_ACTIVE = 1
@@ -135,8 +136,6 @@ class MotionReferenceCommand(CommandTerm):
             -env.step_dt / max(cfg.adaptive_error_time_constant_s, env.step_dt)
         )
         self.rsi_started = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self.push_time = torch.zeros(self.num_envs, device=self.device)
-        self.push_applied = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.shot_success = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.shot_eligible = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
         self.previous_ball_above_hoop = torch.zeros(self.num_envs, device=self.device)
@@ -236,6 +235,9 @@ class MotionReferenceCommand(CommandTerm):
         )
         self.reference = {name: self._sample(name, name in quaternion_fields) for name in fields}
         self.reference["contact"] = (self.reference["contact"] >= 0.5).float()
+        frame_ids = torch.floor(self.frame).long().clamp_min(0)
+        frame_ids = torch.minimum(frame_ids, self.lengths[self.clip_ids] - 1)
+        self.reference["push_available"] = self._batch["push_available"][self.clip_ids, frame_ids] > 0.5
         velocity_fields = (
             "root_lin_vel",
             "root_ang_vel",
@@ -320,7 +322,7 @@ class MotionReferenceCommand(CommandTerm):
         fixed = self.fixed_clip_ids[env_ids]
         self.clip_ids[env_ids] = torch.where(fixed >= 0, fixed, sampled_clips)
         probability = rsi_probability(
-            self._env.common_step_counter, self.cfg.rsi_decay_steps, self.cfg.rsi_initial_probability
+            training_policy_steps(self._env), self.cfg.rsi_decay_steps, self.cfg.rsi_initial_probability
         ) if self.cfg.enable_rsi else 0.0
         use_rsi = torch.rand(len(env_ids), device=self.device) < probability
         valid_frame_count = self.lengths[self.clip_ids[env_ids]].clamp_min(1)
@@ -336,14 +338,12 @@ class MotionReferenceCommand(CommandTerm):
         self.tracking_error_ema[env_ids] = self.cfg.adaptive_initial_error
         self.speed_update_elapsed[env_ids] = 0.0
         self.rsi_started[env_ids] = use_rsi
-        self.push_applied[env_ids] = use_rsi
-        pre_push_window = max(self.cfg.pre_hold_s - self._env.step_dt, 0.0)
-        self.push_time[env_ids] = torch.rand(len(env_ids), device=self.device) * pre_push_window
         self.shot_success[env_ids] = False
         self.shot_eligible[env_ids] = (
             self.frame[env_ids] <= self.release_frame[self.clip_ids[env_ids]]
         )
         self._refresh_reference()
+        arm_push(self._env, env_ids)
         self._previous_reference_dof_pos[env_ids] = self.reference["dof_pos"][env_ids]
         self._write_reference_state(env_ids)
         # ManagerBasedRLEnv resets the action manager before the command
@@ -402,18 +402,6 @@ class MotionReferenceCommand(CommandTerm):
             torch.mean((self.actual_link_pos_b() - self.reference["link_pos_b"]) ** 2, dim=(-1, -2))
         ) / 0.2
         return (root_error + dof_error + link_error) / 3.0
-
-    def _apply_push(self, env_ids: torch.Tensor) -> None:
-        if not self.cfg.enable_push or len(env_ids) == 0:
-            return
-        velocity = self.robot.data.root_link_vel_w[env_ids].clone()
-        velocity[:, :2] += torch.empty((len(env_ids), 2), device=self.device).uniform_(
-            -self.cfg.push_linear_velocity, self.cfg.push_linear_velocity
-        )
-        velocity[:, 5] += torch.empty(len(env_ids), device=self.device).uniform_(
-            -self.cfg.push_yaw_velocity, self.cfg.push_yaw_velocity
-        )
-        self.robot.write_root_link_velocity_to_sim(velocity, env_ids=env_ids)
 
     def update_metrics(self) -> None:
         """Accumulate tracking and shot metrics before automatic resets run."""
@@ -537,11 +525,6 @@ class MotionReferenceCommand(CommandTerm):
         dt = self._env.step_dt
         pre = self.stage == STAGE_PRE_HOLD
         post = self.stage == STAGE_POST_HOLD
-        due_push = (pre | post) & ~self.push_applied & (self.hold_time >= self.push_time)
-        push_ids = due_push.nonzero(as_tuple=False).flatten()
-        self._apply_push(push_ids)
-        self.push_applied[push_ids] = True
-
         self.hold_time[pre | post] += dt
         start_ids = (pre & (self.hold_time + 1.0e-6 >= self.cfg.pre_hold_s)).nonzero(as_tuple=False).flatten()
         self.stage[start_ids] = STAGE_ACTIVE
@@ -587,10 +570,6 @@ class MotionReferenceCommand(CommandTerm):
             self.stage[reached] = STAGE_POST_HOLD
             self.speed[reached] = 0.0
             self.hold_time[reached] = 0.0
-            self.push_applied[reached] = False
-            if torch.any(reached):
-                post_push_window = max(self.cfg.post_hold_s - 2.0 * dt, 0.0)
-                self.push_time[reached] = torch.rand_like(self.push_time[reached]) * post_push_window
 
         # Terminations are evaluated before CommandManager.compute. Mark done
         # one policy interval early so the triggering physics frame completes
@@ -669,8 +648,5 @@ class MotionReferenceCommandCfg(CommandTermCfg):
     adaptive_error_time_constant_s: float = 0.10
     adaptive_initial_error: float = 0.50
     speed_update_interval_s: float = 0.10
-    enable_push: bool = True
-    push_linear_velocity: float = 1.0
-    push_yaw_velocity: float = 0.6
     success_radius: float = 0.20
     resampling_time_range: tuple[float, float] = (1.0e9, 1.0e9)
