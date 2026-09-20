@@ -167,7 +167,6 @@ termination项目包括:
 Student policy 额外需要实现: 
 - observation 噪声, 可控噪声强度.
 - observation 观测延迟.
-- 
 
 ## Domain  Randomization
 
@@ -202,3 +201,56 @@ DR 通过 Curriculum Learning 逐渐加入. 维护标准的 Curriculum Learning 
 - action 执行延迟: 开始采样到均值挡位, 也就是 2 个 step 延迟. (离散采样)
 
 修改完后, 请更新对应的 readme 文档以及更改记录 md 文档. 如有必须修改的文档和代码适配, 请一并修改.
+
+
+## DAgger Student Policy Distillation
+
+请从头帮我实现对现有 Teacher Policy 的 DAgger 蒸馏. 实现解耦的内聚的代码实现, Student 部分要和 Teacher 部分解耦, 因为后续 Teacher 策略的训练可能还需要持续优化. 重点注意可维护性, 代码保持简洁可读, 避免临时性注释.
+
+将新的函数添加到mdp中时, 和学生特有的函数全部要有统一标识, 便于区分. 蒸馏的过程中, student 和 teacher 的实现要解耦, teacher 保证自身的输入输出 pipeline 没有问题, 学生参考teacher的输出. teacher 的输出不会变化, 始终是控制机器人的29维残差.
+
+学生蒸馏的策略输出不要残差+参考轨迹的输出形式, 而是直接相对 nominal pose 的位置输出. 学生和教师策略共用同一套 PD 控制参数.
+
+目前教师策略没有对动作输出进行滤波, 借此降低后续真机部署难度, 学生策略的输出也需要保持直接输出, 不要加滤波.
+
+目前教师策略实现了一些 DR, 提升鲁棒性. 学生策略在训练过程中要继承所有的 DR, 包括:
+- action 执行延迟
+- 动力学参数 DR: 篮球质量
+- 动力学参数 DR: PD控制器刚度
+- 动力学参数 DR: 手-球摩擦系数
+- 动力学参数 DR: 脚-地摩擦系数
+- 动力学参数 DR: link 质量. 调节的 link 包括: `pelvis`, `left_hip_yaw_link`, `left_hip_roll_link`, `left_hip_pitch_link`, `left_knee_link`, `right_hip_yaw_link`, `right_hip_roll_link`, `right_hip_pitch_link`, `right_knee_link`.
+- 外部推力 DR: 向机器人的 `torso` link 施加随机推力于力矩
+
+相关的 DR 已经在 teacher 的训练框架中实现, 尽量直接调用.
+
+除了上述 DR 外, 训练学生策略的过程中还需要加入观测噪声和观测延迟.
+- 观测噪声: 为观测加入可控强度的随机噪声. DAgger 过程中, teacher 观测的始终是无噪声的原始干净数据.
+- 观测延迟: 为观测加入多档离散的随机延迟. DAgger 过程中, teacher 观测的始终是无延迟的原始干净数据. 对学生的离散档位: 共 5 个 step 档位 (对应 100Hz 下的 0, 1, 2, 3, 4 个 steps，即 0ms ~ 40ms). 观测映射: 标称 2 步映射为 0.0，[-1.0, -0.5, 0.0, 0.5, 1.0] 分别对应 0~4 步. inference 时使用固定的中值延迟, 也就是 2 steps. 默认状态下也使用 2 步延迟.
+
+DR 使用课程学习, 使用 S 型曲线的课程学习模型, 最开始完全不添加, 到后期全范围随机采样. 采样范围和方式与教师策略保持一致.
+
+DAgger 蒸馏的学生策略完全不包含自适应播放速度, 而是以固定的 1x 推进.
+
+学生策略的观测项目包括:
+- phase
+- 重力投影, 历史 3 帧
+- pelvis 角速度, 历史 3 帧
+- 相对 nominal pose 的关节位置, 历史 3 帧
+- 关节速度, 历史 3 帧
+- 实际动作, 历史 3 帧
+- 开始状态 hoop 相对 pelvis 的位置 (固定不变)
+
+学生策略观测展平后为 283 维, 不使用自动归一化, 而是手动对不同量纲进行数值缩放, 防止后续部署出现 gap.
+
+学生策略有对应的播放脚本, 可以进行 inference.
+
+学生策略可以直接导出对应的模型权重文件, 以及配置参数, 便于后续真机部署.
+
+学生策略统计教师和学生的对比项目, 包括篮球落点位置, 最高高度.
+
+学生策略暂时不进行后续 finetune, 以及 task reward 设计, 以学习教师策略为主.
+
+学生网络 agent 配置尽量使用官方的 `RslRlOnPolicyRunnerCfg` 而不是自己搭建, 尽量使用官方标准接口.
+
+学生网络隐含层为 `[512, 256, 128]`
