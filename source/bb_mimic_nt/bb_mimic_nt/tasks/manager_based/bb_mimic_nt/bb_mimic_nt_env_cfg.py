@@ -61,7 +61,7 @@ class DomainRandomizationCfg:
     foot_friction_nominal: float = 0.9
     foot_friction_delta: float = 0.3
     link_mass_fraction: float = 0.10
-    push_force_max_n: tuple[float, float, float] = (200.0, 200.0, 50.0)
+    push_force_max_n: tuple[float, float, float] = (50.0, 50.0, 10.0)
     push_torque_max_nm: float = 3.0
     push_duration_s: float = 0.20
     delay: DRScheduleCfg = DRScheduleCfg()

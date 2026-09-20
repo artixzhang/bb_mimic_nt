@@ -36,6 +36,15 @@ def curriculum_strength(schedule, iteration: float, total_iterations: int) -> fl
     return min(1.0, max(0.0, (progress - schedule.start_fraction) / span))
 
 
+class _MassCache:
+    def __init__(self, asset):
+        self.asset = asset
+        self.masses = asset.root_physx_view.get_masses().clone()
+        self.inertias = asset.root_physx_view.get_inertias().clone()
+        self.default_masses = asset.data.default_mass.cpu().clone()
+        self.default_inertias = asset.data.default_inertia.cpu().clone()
+
+
 class DomainRandomizationContext:
     """Per-environment parameters and pulse state shared by events, actions, and observations."""
 
@@ -82,6 +91,7 @@ class DomainRandomizationContext:
         self.push_target_frame = torch.full((count,), -1, device=device, dtype=torch.long)
         self.push_steps_left = torch.zeros(count, device=device, dtype=torch.long)
         self.push_used = torch.zeros(count, device=device, dtype=torch.bool)
+        self.push_applied = torch.zeros(count, device=device, dtype=torch.bool)
         self.iteration_offset = 0
 
         self.joint_ids = self.motion.joint_ids
@@ -98,6 +108,12 @@ class DomainRandomizationContext:
             raise ValueError("Could not map robot collision shapes to bodies for friction DR.")
         self.hand_shapes = self._shape_ids(shape_counts, self.hand_ids)
         self.foot_shapes = self._shape_ids(shape_counts, self.foot_ids)
+        self.ball_mass_cache = _MassCache(self.ball)
+        self.robot_mass_cache = _MassCache(self.robot)
+        self.materials = self.robot.root_physx_view.get_material_properties().clone()
+        self.joint_stiffness_cpu = self.robot.data.joint_stiffness.cpu().clone()
+        self.joint_damping_cpu = self.robot.data.joint_damping.cpu().clone()
+        self.joint_ids_cpu = torch.as_tensor(self.joint_ids, dtype=torch.long, device="cpu")
 
     def _body_ids(self, names: tuple[str, ...]) -> tuple[int, ...]:
         ids, resolved = self.robot.find_bodies(list(names), preserve_order=True)
@@ -146,31 +162,37 @@ def _uniform_scale(count: int, half_range: float, strength: float, device: str) 
     return 1.0 + (2.0 * torch.rand(count, device=device) - 1.0) * half_range * strength
 
 
-def _set_masses_and_inertias(asset, env_ids: torch.Tensor, body_ids: tuple[int, ...] | None, scale: torch.Tensor):
-    indices = env_ids.cpu()
-    factors = scale.cpu()
-    masses = asset.root_physx_view.get_masses()
-    inertias = asset.root_physx_view.get_inertias()
+def _set_masses_and_inertias(
+    cache: _MassCache, indices: torch.Tensor, body_ids: tuple[int, ...] | None, factors: torch.Tensor
+):
     if body_ids is None:
-        masses[indices] = asset.data.default_mass[indices] * factors[:, None]
-        inertias[indices] = asset.data.default_inertia[indices] * factors[:, None]
+        mass_scale = factors.reshape((-1,) + (1,) * (cache.default_masses.ndim - 1))
+        inertia_scale = factors.reshape((-1,) + (1,) * (cache.default_inertias.ndim - 1))
+        cache.masses[indices] = cache.default_masses[indices] * mass_scale
+        cache.inertias[indices] = cache.default_inertias[indices] * inertia_scale
     else:
         bodies = torch.tensor(body_ids, dtype=torch.long)
-        masses[indices[:, None], bodies] = asset.data.default_mass[indices[:, None], bodies] * factors[:, None]
-        inertias[indices[:, None], bodies] = (
-            asset.data.default_inertia[indices[:, None], bodies] * factors[:, None, None]
+        cache.masses[indices[:, None], bodies] = cache.default_masses[indices[:, None], bodies] * factors[:, None]
+        cache.inertias[indices[:, None], bodies] = (
+            cache.default_inertias[indices[:, None], bodies] * factors[:, None, None]
         )
-    asset.root_physx_view.set_masses(masses, indices)
-    asset.root_physx_view.set_inertias(inertias, indices)
+    cache.asset.root_physx_view.set_masses(cache.masses, indices)
+    cache.asset.root_physx_view.set_inertias(cache.inertias, indices)
 
 
-def _set_pd_gains(context: DomainRandomizationContext, env_ids: torch.Tensor):
+def _set_pd_gains(context: DomainRandomizationContext, env_ids: torch.Tensor, indices: torch.Tensor):
     robot = context.robot
     alpha = context.pd_scale[env_ids, None]
     stiffness = robot.data.default_joint_stiffness[env_ids[:, None], context.joint_ids] * alpha
     damping = robot.data.default_joint_damping[env_ids[:, None], context.joint_ids] * torch.sqrt(alpha)
-    robot.write_joint_stiffness_to_sim(stiffness, joint_ids=context.joint_ids, env_ids=env_ids)
-    robot.write_joint_damping_to_sim(damping, joint_ids=context.joint_ids, env_ids=env_ids)
+    robot.data.joint_stiffness[env_ids[:, None], context.joint_ids] = stiffness
+    robot.data.joint_damping[env_ids[:, None], context.joint_ids] = damping
+    joint_ids = context.joint_ids_cpu
+    gains_cpu = torch.stack((stiffness, damping)).cpu()
+    context.joint_stiffness_cpu[indices[:, None], joint_ids] = gains_cpu[0]
+    context.joint_damping_cpu[indices[:, None], joint_ids] = gains_cpu[1]
+    robot.root_physx_view.set_dof_stiffnesses(context.joint_stiffness_cpu, indices)
+    robot.root_physx_view.set_dof_dampings(context.joint_damping_cpu, indices)
     for actuator in robot.actuators.values():
         joint_ids = actuator.joint_indices
         if isinstance(joint_ids, slice):
@@ -179,15 +201,13 @@ def _set_pd_gains(context: DomainRandomizationContext, env_ids: torch.Tensor):
         actuator.damping[env_ids] = robot.data.joint_damping[env_ids[:, None], joint_ids]
 
 
-def _set_friction(context: DomainRandomizationContext, env_ids: torch.Tensor):
-    indices = env_ids.cpu()
-    materials = context.robot.root_physx_view.get_material_properties()
+def _set_friction(context: DomainRandomizationContext, indices: torch.Tensor, frictions: torch.Tensor):
+    materials = context.materials
     for shapes, values in (
-        (context.hand_shapes, context.hand_friction),
-        (context.foot_shapes, context.foot_friction),
+        (context.hand_shapes, frictions[:, 0]),
+        (context.foot_shapes, frictions[:, 1]),
     ):
-        sampled = values[env_ids].cpu()
-        materials[indices[:, None], shapes[None, :], :2] = sampled[:, None, None]
+        materials[indices[:, None], shapes[None, :], :2] = values[:, None, None]
     context.robot.root_physx_view.set_material_properties(materials, indices)
 
 
@@ -226,10 +246,23 @@ def reset_domain_randomization(env, env_ids: torch.Tensor):
     context.push_target_frame[env_ids] = -1
     context.push_steps_left[env_ids] = 0
     context.push_used[env_ids] = False
-    _set_masses_and_inertias(context.ball, env_ids, None, context.ball_mass_scale[env_ids])
-    _set_masses_and_inertias(context.robot, env_ids, context.link_mass_ids, context.link_mass_scale[env_ids])
-    _set_pd_gains(context, env_ids)
-    _set_friction(context, env_ids)
+    context.push_applied[env_ids] = False
+    if context.robot.has_external_wrench:
+        context.robot.has_external_wrench = bool(context.push_applied.any())
+    indices = env_ids.cpu()
+    sampled = torch.stack(
+        (
+            context.ball_mass_scale[env_ids],
+            context.link_mass_scale[env_ids],
+            context.hand_friction[env_ids],
+            context.foot_friction[env_ids],
+        ),
+        dim=-1,
+    ).cpu()
+    _set_masses_and_inertias(context.ball_mass_cache, indices, None, sampled[:, 0])
+    _set_masses_and_inertias(context.robot_mass_cache, indices, context.link_mass_ids, sampled[:, 1])
+    _set_pd_gains(context, env_ids, indices)
+    _set_friction(context, indices, sampled[:, 2:])
 
 
 def arm_push(env, env_ids: torch.Tensor):
@@ -249,6 +282,10 @@ def arm_push(env, env_ids: torch.Tensor):
 def advance_push_pulse(env, env_ids: torch.Tensor | None):
     """Update the torso wrench once per policy step and obey the reference gate."""
     context = get_dr_context(env)
+    cfg = env.cfg.dr
+    iteration = context.iteration_offset + env.common_step_counter / cfg.steps_per_iteration
+    if curriculum_strength(cfg.push, iteration, cfg.total_iterations) == 0.0 and not context.robot.has_external_wrench:
+        return
     motion = context.motion
     allowed = motion.reference["push_available"]
     context.push_steps_left[~allowed] = 0
@@ -258,13 +295,18 @@ def advance_push_pulse(env, env_ids: torch.Tensor | None):
         & (context.push_target_frame >= 0)
         & (motion.frame >= context.push_target_frame)
     )
-    pulse_steps = round(env.cfg.dr.push_duration_s / env.step_dt)
+    pulse_steps = round(cfg.push_duration_s / env.step_dt)
     context.push_steps_left[due] = pulse_steps
     context.push_used[due] = True
     active = context.push_steps_left > 0
-    forces = torch.where(active[:, None, None], context.push_force, torch.zeros_like(context.push_force))
-    torques = torch.where(active[:, None, None], context.push_torque, torch.zeros_like(context.push_torque))
-    context.robot.set_external_force_and_torque(
-        forces, torques, body_ids=[context.torso_id], is_global=True
-    )
+    changed = torch.nonzero(active != context.push_applied).flatten()
+    if len(changed) > 0:
+        enabled = active[changed, None, None]
+        forces = torch.where(enabled, context.push_force[changed], 0.0)
+        torques = torch.where(enabled, context.push_torque[changed], 0.0)
+        context.robot.set_external_force_and_torque(
+            forces, torques, body_ids=[context.torso_id], env_ids=changed, is_global=True
+        )
+        context.push_applied[changed] = active[changed]
+        context.robot.has_external_wrench = bool(context.push_applied.any())
     context.push_steps_left[active] -= 1
