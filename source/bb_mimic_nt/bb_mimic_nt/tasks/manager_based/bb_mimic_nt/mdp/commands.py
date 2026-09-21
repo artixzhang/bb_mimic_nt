@@ -643,7 +643,7 @@ class MotionReferenceCommandCfg(CommandTermCfg):
     enable_rsi: bool = True
     rsi_initial_probability: float = 0.8
     rsi_decay_steps: int = 144_000
-    enable_adaptive_speed: bool = True
+    enable_adaptive_speed: bool = False
     speed_choices: tuple[float, float, float, float] = (0.5, 0.75, 1.0, 1.25)
     adaptive_error_time_constant_s: float = 0.10
     adaptive_initial_error: float = 0.50

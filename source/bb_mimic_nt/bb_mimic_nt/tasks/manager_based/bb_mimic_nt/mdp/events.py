@@ -54,7 +54,7 @@ class DomainRandomizationContext:
             raise ValueError("DR training iterations and steps per iteration must be positive.")
         if cfg.delay_max_offset_steps < 1 or cfg.delay_nominal_steps < cfg.delay_max_offset_steps:
             raise ValueError("DR delay nominal and maximum offset must define non-negative steps.")
-        if len(cfg.push_force_max_n) != 3:
+        if len(cfg.push_force_min_n) != 3 or len(cfg.push_force_max_n) != 3:
             raise ValueError("DR push force ranges must contain x, y, and z limits.")
         if min(
             cfg.ball_mass_fraction,
@@ -63,9 +63,12 @@ class DomainRandomizationContext:
             cfg.foot_friction_delta,
             cfg.link_mass_fraction,
             cfg.push_torque_max_nm,
+            *cfg.push_force_min_n,
             *cfg.push_force_max_n,
         ) <= 0.0:
             raise ValueError("DR randomization ranges must be positive.")
+        if any(lower > upper for lower, upper in zip(cfg.push_force_min_n, cfg.push_force_max_n)):
+            raise ValueError("DR push force minimums must not exceed their maximums.")
         if cfg.ball_mass_fraction >= 1.0 or cfg.pd_gain_fraction >= 1.0 or cfg.link_mass_fraction >= 1.0:
             raise ValueError("DR mass and PD fractions must be less than one.")
         if cfg.hand_friction_nominal < cfg.hand_friction_delta or cfg.foot_friction_nominal < cfg.foot_friction_delta:
@@ -86,6 +89,7 @@ class DomainRandomizationContext:
         self.foot_friction = torch.full((count,), cfg.foot_friction_nominal, device=device)
         self.link_mass_scale = torch.ones(count, device=device)
         self.push_force = torch.zeros((count, 1, 3), device=device)
+        self.push_force_min = torch.tensor(cfg.push_force_min_n, device=device)
         self.push_force_max = torch.tensor(cfg.push_force_max_n, device=device)
         self.push_torque = torch.zeros_like(self.push_force)
         self.push_target_frame = torch.full((count,), -1, device=device, dtype=torch.long)
@@ -160,6 +164,15 @@ def training_policy_steps(env) -> float:
 
 def _uniform_scale(count: int, half_range: float, strength: float, device: str) -> torch.Tensor:
     return 1.0 + (2.0 * torch.rand(count, device=device) - 1.0) * half_range * strength
+
+
+def _uniform_signed(
+    count: int, lower: torch.Tensor, upper: torch.Tensor, strength: float, device: str
+) -> torch.Tensor:
+    """Sample per-axis magnitudes in [lower, upper], randomize signs, then apply curriculum strength."""
+    magnitude = lower + torch.rand((count, 3), device=device) * (upper - lower)
+    sign = torch.where(torch.rand((count, 3), device=device) < 0.5, -1.0, 1.0)
+    return sign * magnitude * strength
 
 
 def _set_masses_and_inertias(
@@ -237,9 +250,9 @@ def reset_domain_randomization(env, env_ids: torch.Tensor):
         2.0 * torch.rand(count, device=device) - 1.0
     ) * cfg.foot_friction_delta * strength["foot_friction"]
     context.link_mass_scale[env_ids] = _uniform_scale(count, cfg.link_mass_fraction, strength["link_mass"], device)
-    context.push_force[env_ids, 0] = (
-        2.0 * torch.rand((count, 3), device=device) - 1.0
-    ) * context.push_force_max * strength["push"]
+    context.push_force[env_ids, 0] = _uniform_signed(
+        count, context.push_force_min, context.push_force_max, strength["push"], device
+    )
     context.push_torque[env_ids, 0] = (
         2.0 * torch.rand((count, 3), device=device) - 1.0
     ) * cfg.push_torque_max_nm * strength["push"]

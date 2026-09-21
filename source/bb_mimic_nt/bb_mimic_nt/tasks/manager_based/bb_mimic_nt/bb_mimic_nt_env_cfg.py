@@ -61,9 +61,10 @@ class DomainRandomizationCfg:
     foot_friction_nominal: float = 0.9
     foot_friction_delta: float = 0.3
     link_mass_fraction: float = 0.10
+    push_force_min_n: tuple[float, float, float] = (30.0, 30.0, 5.0)
     push_force_max_n: tuple[float, float, float] = (50.0, 50.0, 10.0)
     push_torque_max_nm: float = 3.0
-    push_duration_s: float = 0.20
+    push_duration_s: float = 1.0
     delay: DRScheduleCfg = DRScheduleCfg()
     ball_mass: DRScheduleCfg = DRScheduleCfg()
     pd_gains: DRScheduleCfg = DRScheduleCfg()
@@ -267,6 +268,6 @@ class G1ShootPlayEnvCfg(G1ShootEnvCfg):
         self.observations.policy.enable_corruption = False
         self.commands.motion.enable_rsi = False
         self.commands.motion.randomize_clip = False
-        self.commands.motion.enable_adaptive_speed = True
+        self.commands.motion.enable_adaptive_speed = False
         for name in ("delay", "ball_mass", "pd_gains", "hand_friction", "foot_friction", "link_mass", "push"):
             getattr(self.dr, name).enabled = False

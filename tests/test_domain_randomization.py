@@ -28,6 +28,7 @@ def _ranges():
         foot_friction_nominal=0.9,
         foot_friction_delta=0.3,
         link_mass_fraction=0.10,
+        push_force_min_n=(40.0, 40.0, 10.0),
         push_force_max_n=(200.0, 200.0, 50.0),
         push_torque_max_nm=3.0,
     )
@@ -80,6 +81,7 @@ def test_reset_only_changes_selected_context_rows(monkeypatch) -> None:
         foot_friction=torch.full((3,), 0.9),
         link_mass_scale=torch.ones(3),
         push_force=torch.zeros(3, 1, 3),
+        push_force_min=torch.tensor([40.0, 40.0, 10.0]),
         push_force_max=torch.tensor([200.0, 200.0, 50.0]),
         push_torque=torch.zeros(3, 1, 3),
         push_target_frame=torch.full((3,), -1, dtype=torch.long),
@@ -110,7 +112,18 @@ def test_reset_only_changes_selected_context_rows(monkeypatch) -> None:
     assert torch.all((context.delay_steps[[0, 2]] >= 0) & (context.delay_steps[[0, 2]] <= 4))
     assert torch.all((context.ball_mass_scale[[0, 2]] >= 0.95) & (context.ball_mass_scale[[0, 2]] <= 1.05))
     assert torch.all(context.push_force[[0, 2], 0].abs() <= context.push_force_max)
-    assert torch.all(context.push_force[[0, 2], 0].abs().amax(dim=0) > context.push_force_max * 0.1)
+    assert torch.all(context.push_force[[0, 2], 0].abs() >= context.push_force_min)
+
+
+def test_push_force_range_is_scaled_by_curriculum_strength() -> None:
+    torch.manual_seed(11)
+    lower = torch.tensor([10.0, 20.0, 2.0])
+    upper = torch.tensor([50.0, 60.0, 10.0])
+    force = events._uniform_signed(1024, lower, upper, 0.25, "cpu")
+    assert torch.all(force.abs() >= lower * 0.25)
+    assert torch.all(force.abs() <= upper * 0.25)
+    assert torch.all(force.min(dim=0).values < 0.0)
+    assert torch.all(force.max(dim=0).values > 0.0)
 
 
 def test_privileged_observation_order_and_nominal_values() -> None:
