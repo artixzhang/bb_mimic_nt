@@ -619,7 +619,12 @@ class MotionReferenceCommand(CommandTerm):
         translations = torch.cat(
             (link_points, ball_points[:, None, :], hoop_points[:, None, :]), dim=1
         ).flatten(0, 1)
-        marker_indices = torch.tensor((0, 0, 0, 0, 1, 2), device=self.device).repeat(self.num_envs)
+        marker_indices = torch.cat(
+            (
+                torch.zeros(link_points.shape[1], dtype=torch.long, device=self.device),
+                torch.tensor((1, 2), dtype=torch.long, device=self.device),
+            )
+        ).repeat(self.num_envs)
         self._reference_markers.visualize(translations=translations, marker_indices=marker_indices)
 
 
@@ -636,7 +641,7 @@ class MotionReferenceCommandCfg(CommandTermCfg):
     hoop_root_quat: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
     tracked_body_names: list[str] = list(TRACKED_BODY_NAMES)
     auto_preprocess: bool = True
-    pre_hold_s: float = 0.5
+    pre_hold_s: float = 0.0
     post_hold_s: float = 1.0
     randomize_clip: bool = True
     default_clip_id: int = 0

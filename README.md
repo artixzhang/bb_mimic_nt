@@ -1,6 +1,6 @@
-# BB Mimic NT：Unitree G1 跳跃投篮 Teacher Policy
+# BB Mimic NT：Unitree G1 跳跃投篮 Teacher 与 Student
 
-本项目在 Isaac Lab 2.3 / Isaac Sim 5.1 中实现 G1–篮球–篮筐的 manager-based PPO 模仿环境。当前只包含 Teacher policy：100 条定点跳跃投篮轨迹均匀混训，不包含 AMP、Student 蒸馏、XGen 或真机部署。
+本项目在 Isaac Lab 2.3 / Isaac Sim 5.1 中实现 G1–篮球–篮筐的 manager-based PPO 模仿环境，以及独立的 Student DAgger 蒸馏、评估和部署导出流程。Teacher 使用 100 条定点跳跃投篮轨迹均匀混训；Student 只拟合冻结 Teacher，不包含 task reward 或后续 finetune。
 
 ## 环境与数据
 
@@ -9,8 +9,8 @@
 - 仿真 / 策略频率：200 Hz / 100 Hz（decimation 2）
 - 动作：29 维 reference-relative PD residual；Gaussian policy 输出经 `tanh` 约束，最终 PD 目标限制在机械关节限位内，再按每环境 0–4 个策略步延迟执行
 - Teacher observation：固定 479 维，包含当前状态、reference pose/velocity/contact、历史、phase、reference speed 和 6 维 DR 特权参数
-- 原始轨迹：`source/bb_mimic_nt/assets/trajectory/shoot_batch_0918.pkl`
-- 预处理缓存：同目录 `shoot_batch_0918_processed.pt`（自动生成并被 Git 忽略）
+- 原始轨迹：`source/bb_mimic_nt/assets/trajectory/shoot_batch_0922.pkl`
+- 预处理缓存：同目录 `shoot_batch_0922_processed.pt`（自动生成并被 Git 忽略）
 - 场景资产配置：`source/bb_mimic_nt/bb_mimic_nt/objects/`；环境直接复用其中的篮球、floating hoop 和地面配置
 
 轨迹被解释为每个并行环境自己的 local-world 坐标；写入仿真时才叠加 env origin。缓存包含 schema、源文件与 URDF 哈希、有效长度、padding mask、29 DoF、四路 contact、逐帧 `push_available`、FK link / hand anchor 及差分速度。哈希或 schema 过期时，训练会自动重建。
@@ -28,8 +28,8 @@ python scripts/preprocess_trajectory.py
 
 ```bash
 python scripts/preprocess_trajectory.py \
-  --input source/bb_mimic_nt/assets/trajectory/shoot_batch_0918.pkl \
-  --output source/bb_mimic_nt/assets/trajectory/shoot_batch_0918_processed.pt \
+  --input source/bb_mimic_nt/assets/trajectory/shoot_batch_0922.pkl \
+  --output source/bb_mimic_nt/assets/trajectory/shoot_batch_0922_processed.pt \
   --force
 ```
 
@@ -55,7 +55,7 @@ python scripts/rsl_rl/train.py \
 
 ## Domain Randomization
 
-每次环境 reset 独立采样，直到下次 reset 保持不变。`env_cfg.dr` 为七项 DR 分别提供 `enabled`、`start_fraction` 和 `end_fraction`，并集中配置标称值、采样幅度和推力持续时间；默认在训练进度 20% 前使用标称值，20%–60% 线性扩大范围。六维特权观测依次为延迟、篮球质量、PD 比例、手部摩擦、脚部摩擦、腿部及骨盆 link 质量比例，按完整范围映射到 [-1, 1]，标称值均为 0。
+每次环境 reset 独立采样，直到下次 reset 保持不变。`env_cfg.dr` 为七项 DR 分别提供 `enabled`、`start_fraction` 和 `end_fraction`，并集中配置标称值、采样幅度和推力持续时间；默认在训练进度 20% 前使用标称值，20%–60% 通过 cubic smoothstep S 曲线平滑扩大范围，课程起止点斜率均为零。六维特权观测依次为延迟、篮球质量、PD 比例、手部摩擦、脚部摩擦、腿部及骨盆 link 质量比例，按完整范围映射到 [-1, 1]，标称值均为 0。
 
 | 项目 | 标称值 | 完整采样范围 |
 | --- | ---: | ---: |
@@ -122,3 +122,40 @@ python scripts/rsl_rl/evaluate_shooting.py \
 ```bash
 PYTHONPATH=source/bb_mimic_nt pytest -q tests
 ```
+
+## Student DAgger
+
+Student 训练和播放任务分别为 `BbMimicNT-G1-Shoot-Student-DAgger-v0` 与 `BbMimicNT-G1-Shoot-Student-Play-v0`。Teacher 保持原始 479 维无噪声、无观测延迟输入；Student 使用固定 283 维显式缩放输入：phase、三帧重力投影、pelvis 角速度、nominal-relative 关节位置、关节速度、实际执行动作，以及 reset 时固定的 hoop–pelvis 相对位置。机器人传感量训练时加入可调高斯噪声与每回合采样一次的 0–4 步延迟，推理固定为 2 步。
+
+Student 输出 29 维 nominal-relative 关节位置（rad），直接形成 PD target，不经过滤波。它与 Teacher 共用 PD 参数、0–4 步动作执行延迟以及全部动力学/外力 DR；Student 训练从第一个 iteration 起使用完整 DR 范围，reference 始终以 1× 推进。DAgger 在前 20% 完全由 Teacher 执行，20%–50% 通过 smoothstep 概率逐环境混合，从 50% 起完全由 Student 执行；所有访问状态始终由冻结 Teacher 标注。
+
+```bash
+python scripts/rsl_rl/train_dagger.py \
+  --teacher-checkpoint logs/rsl_rl/g1_shoot_teacher_v2/<run>/model_4999.pt \
+  --headless
+```
+
+Teacher 的网络结构、动作缩放和 DR 参数从所选 checkpoint 的 `params/` 读取。训练前即写出 `params/env.yaml`、`params/agent.yaml` 和 `params/student_config.json`；每个 `model_*.pt` 都包含独立导出所需的模型结构与部署 metadata。默认每轮收集 24 步并更新 32 次；回放容量的一半保存最新 FIFO 状态、一半作为全历史 reservoir，每个 batch 默认 75% 采样最新状态，避免 Student 接管后的闭环状态被旧数据稀释。回放数据常驻训练 device，避免 rollout 期间 CPU/GPU 往返；如需在恢复训练时连同回放集恢复，可添加 `--save-replay`。
+
+```bash
+python scripts/rsl_rl/play_student.py \
+  --student-weights logs/rsl_rl/g1_shoot_student_dagger_v1/<run>/exported/student_weights.pt \
+  --clip-id 0
+
+python scripts/rsl_rl/play_student.py \
+  --student-weights logs/rsl_rl/g1_shoot_student_dagger_v1/<run>/model_400.pt \
+  --clip-id 0
+
+python scripts/rsl_rl/play_student.py \
+  --student-weights /path/to/student_weights.pt --all-clips
+
+python scripts/rsl_rl/evaluate_student.py \
+  --teacher-checkpoint /path/to/teacher_model.pt \
+  --student-weights /path/to/student_weights.pt --headless
+
+python scripts/rsl_rl/export_student.py \
+  --checkpoint /path/to/model_250.pt \
+  --output outputs/student_export
+```
+
+交互播放支持 `V` reference 点、`,` / `.` 切换 clip、`P` 或空格暂停/恢复、`R` 重启、`--all-clips`、`--ignore-failures` 和 `--no-timeout`。导出目录包含 `student_weights.pt`、TorchScript、ONNX 与 `student_config.json`；配置记录观测顺序/缩放、关节顺序、nominal pose、安全限位、PD 参数和固定中值延迟。成对评估对相同 clip 分别运行 Teacher 与 Student，输出篮球首次触地相对篮筐的水平落点和最高高度。

@@ -143,6 +143,22 @@ def gated_top_level_reward(
     return torch.sum(values * weight, dim=-1) / weight.sum(dim=-1).clamp_min(1.0e-8)
 
 
+def gated_height_shortfall_cost(
+    actual_height: torch.Tensor,
+    reference_height: torch.Tensor,
+    reference_contact: torch.Tensor,
+    allowed_shortfall: float,
+) -> torch.Tensor:
+    """Penalize feet below their reference height only while they should be airborne."""
+    if actual_height.shape != reference_height.shape or actual_height.shape != reference_contact.shape:
+        raise ValueError("Height and contact tensors must have matching shapes.")
+    if allowed_shortfall < 0.0:
+        raise ValueError("allowed_shortfall must be non-negative.")
+    airborne = 1.0 - reference_contact
+    shortfall = torch.relu(reference_height - actual_height - allowed_shortfall)
+    return torch.sum(airborne * shortfall, dim=-1)
+
+
 def clipped_regularization(
     costs: Sequence[torch.Tensor], weights: Sequence[float], maximum: float = 0.20
 ) -> torch.Tensor:

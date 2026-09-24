@@ -49,10 +49,13 @@ def _delay_selector():
     return namespace["delayed_target"]
 
 
-def test_linear_curriculum_and_switch() -> None:
+def test_smoothstep_curriculum_and_switch() -> None:
     schedule = SimpleNamespace(enabled=True, start_fraction=0.2, end_fraction=0.6)
-    assert [events.curriculum_strength(schedule, step, 100) for step in (0, 20, 40, 60, 100)] == pytest.approx(
-        [0.0, 0.0, 0.5, 1.0, 1.0]
+    assert [
+        events.curriculum_strength(schedule, step, 100)
+        for step in (0, 20, 30, 40, 50, 60, 100)
+    ] == pytest.approx(
+        [0.0, 0.0, 0.15625, 0.5, 0.84375, 1.0, 1.0]
     )
     schedule.enabled = False
     assert events.curriculum_strength(schedule, 60, 100) == 0.0

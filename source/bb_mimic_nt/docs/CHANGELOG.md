@@ -1,5 +1,17 @@
 # Changelog
 
+- Teacher 的七项 DR 课程统一由线性插值改为 cubic smoothstep S 曲线，保持原起止区间且消除区间边界的强度斜率突变；Student 全强度 DR 不受影响。
+
+- DAgger replay 改为近期 FIFO 与历史 reservoir 分区存储，每个监督 batch 默认 75% 使用近期状态；默认 rollout 从 96 步缩短为 24 步并增加更新次数，减少 Student 闭环状态被旧数据稀释的问题。
+
+## 2026-09-21 — Student DAgger 蒸馏
+
+- 新增与 Teacher 解耦的 Student 任务、283 维 nominal-relative 历史观测、Student-only 观测噪声及每回合 0–4 步观测延迟；Teacher 输入保持原 479 维干净数据。
+- Student 直接输出 nominal-relative 29 维 PD 位置目标且不滤波；复用 Teacher 的 PD、动作延迟、完整动力学 DR 和受 reference gate 控制的 torso 推力，Student 训练从开始即全范围采样并固定 1× reference。
+- DAgger 使用 20% Teacher warm-up、20%–50% smoothstep 混合和 50% 后纯 Student 执行；Teacher residual 经原动作管线转换成 Student 标签，聚合回放常驻训练 device。
+- 新增任意 checkpoint 导出、完整交互播放和 Teacher/Student 篮球落点与最高高度成对评估；训练前保存全部环境、agent 和部署配置。
+- Student 播放与评估自动区分自包含的训练 `model_*.pt` 和导出的 `student_weights.pt`，训练过程中无需预先导出即可检查任意 checkpoint。
+
 ## 2026-09-19 — 关节 jerk 与分轴推力
 
 - 统一奖励增加逐环境关节 jerk 正则，reset 后前两步不计罚；`torso_link` 推力改为 X/Y 各 ±200 N、Z ±50 N 的独立采样范围。
@@ -8,7 +20,7 @@
 
 - 增加统一的 reset DR context 和七项可独立配置的线性课程；训练 CLI 与恢复训练的 iteration 用于课程进度。
 - 最终 PD 目标增加 0–4 步执行延迟；篮球质量、PD 刚度与阻尼、手/脚摩擦、九个 link 质量按环境随机化。
-- 轨迹改用 `shoot_batch_0918.pkl`，缓存 schema 增加逐帧 `push_available`；原速度推动改为受标记约束的 `torso_link` 200 ms 三轴力与力矩脉冲。
+- 轨迹改用 `shoot_batch_0922.pkl`，缓存 schema 增加逐帧 `push_available`；原速度推动改为受标记约束的 `torso_link` 200 ms 三轴力与力矩脉冲。
 - Teacher observation 增加六维归一化特权参数至 479 维，实验目录改为 `g1_shoot_teacher_v3`，旧 checkpoint 不兼容。
 
 ## v0.3.0 — 2026-09-11

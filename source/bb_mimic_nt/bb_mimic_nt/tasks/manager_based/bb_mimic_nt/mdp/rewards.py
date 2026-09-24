@@ -17,6 +17,7 @@ from isaaclab.utils.math import quat_error_magnitude, quat_inv, quat_mul
 
 from bb_mimic_nt.core import (
     clipped_regularization,
+    gated_height_shortfall_cost,
     gated_top_level_reward,
     gaussian,
     joint_jerk_cost,
@@ -114,9 +115,12 @@ def contact_graph_reward(
 
 @configclass
 class UnifiedRewardCfg:
-    global_weights: tuple[float, float, float, float] = (0.45, 0.25, 0.20, 0.10)
-    body_weights: tuple[float, float, float, float] = (0.27, 0.36, 0.27, 0.10)
-    root_weights: tuple[float, float, float, float] = (0.35, 0.35, 0.20, 0.10)
+    # body, obj, relative, contact
+    global_weights: tuple[float, float, float, float] = (0.45, 0.25, 0.25, 0.15)
+    # root, joint, link, rotation_only
+    body_weights: tuple[float, float, float, float] = (0.30, 0.33, 0.27, 0.10)
+    # position, rotation, linear_velocity, angular_velocity
+    root_weights: tuple[float, float, float, float] = (0.50, 0.30, 0.15, 0.05)
     joint_weights: tuple[float, float] = (0.70, 0.30)
     link_weights: tuple[float, float] = (0.70, 0.30)
 
@@ -125,7 +129,7 @@ class UnifiedRewardCfg:
     object_sigmas: tuple[float, float, float, float] = (8.0, 6.0, 0.5, 1.0)
 
     relative_weights: tuple[float, float] = (1.0, 0.0)
-    root_sigmas: tuple[float, float, float, float] = (20.0, 10.0, 2.0, 0.5)
+    root_sigmas: tuple[float, float, float, float] = (40.0, 10.0, 2.0, 0.5)
     joint_sigmas: tuple[float, float] = (4.0, 0.1)
     link_sigmas: tuple[float, float] = (40.0, 5.0)
     rotation_only_sigma: float = 5.0
@@ -134,15 +138,17 @@ class UnifiedRewardCfg:
     foot_contact_sensitivity: float = 1.0
     hand_contact_force: float = 1.0
     foot_contact_force: float = 5.0
+    foot_airborne_height_tolerance: float = 0.05
+    foot_airborne_height_weight: float = 0.50
     action_magnitude_weight: float = 0.05
-    action_rate_weight: float = 0.25
+    action_rate_weight: float = 0.3
     target_residual_rate_weight: float = 0.05
-    torque_weight: float = 0.005
+    torque_weight: float = 1.0e-5
     limit_weight: float = 0.05
     joint_velocity_error_weight: float = 0.001
     joint_jerk_weight: float = 2.0e-10
     regularization_clip: float = 0.5
-    termination_penalty: float = 50.0
+    termination_penalty: float = 100.0
 
 
 def regularization_cost(
@@ -349,6 +355,26 @@ class UnifiedMimicReward(ManagerTermBase):
             settings.hand_contact_sensitivity,
             settings.foot_contact_sensitivity,
         )
+        foot_link_indices = tuple(
+            term.tracked_body_names.index(name)
+            for name in ("left_ankle_roll_link", "right_ankle_roll_link")
+        )
+        foot_contact_indices = tuple(
+            term.contact_names.index(name)
+            for name in ("left_foot_ground", "right_foot_ground")
+        )
+        foot_body_ids = [term.body_ids[index] for index in foot_link_indices]
+        actual_foot_height = robot.data.body_pos_w[:, foot_body_ids, 2]
+        reference_foot_height = (
+            reference["link_pos_w"][:, foot_link_indices] + origin[:, None]
+        )[:, :, 2]
+        foot_airborne_height_shortfall = gated_height_shortfall_cost(
+            actual_foot_height,
+            reference_foot_height,
+            reference["contact"][:, foot_contact_indices],
+            settings.foot_airborne_height_tolerance,
+        )
+        foot_airborne_height_penalty = settings.foot_airborne_height_weight * foot_airborne_height_shortfall
         mimic = gated_top_level_reward(
             body,
             obj,
@@ -361,7 +387,7 @@ class UnifiedMimicReward(ManagerTermBase):
         regularization = regularization_cost(term, settings, env, joint_jerk)
         termination = env.termination_manager.terminated.float() * settings.termination_penalty
         total = torch.nan_to_num(
-            mimic - regularization["reg/total"] - termination,
+            mimic - regularization["reg/total"] - foot_airborne_height_penalty - termination,
             nan=-settings.termination_penalty,
             posinf=-settings.termination_penalty,
             neginf=-settings.termination_penalty,
@@ -383,6 +409,7 @@ class UnifiedMimicReward(ManagerTermBase):
                 "mimic/relative": relative,
                 "mimic/contact": contact,
                 "mimic/total": mimic,
+                "penalty/foot_airborne_height": foot_airborne_height_penalty,
                 **regularization,
                 "termination": termination,
                 "total": total,

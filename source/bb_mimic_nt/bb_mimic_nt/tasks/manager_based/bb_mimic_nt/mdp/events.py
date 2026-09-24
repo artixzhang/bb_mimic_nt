@@ -26,14 +26,17 @@ FOOT_BODIES = ("left_ankle_roll_link", "right_ankle_roll_link")
 
 
 def curriculum_strength(schedule, iteration: float, total_iterations: int) -> float:
-    """Return the active fraction of a linear randomization range."""
+    """Return the active DR range fraction using a cubic smoothstep curriculum."""
     if not schedule.enabled:
         return 0.0
+    if getattr(schedule, "full_strength", False):
+        return 1.0
     if not 0.0 <= schedule.start_fraction < schedule.end_fraction <= 1.0:
         raise ValueError("DR schedule fractions must satisfy 0 <= start < end <= 1.")
     progress = iteration / max(total_iterations, 1)
     span = schedule.end_fraction - schedule.start_fraction
-    return min(1.0, max(0.0, (progress - schedule.start_fraction) / span))
+    normalized = min(1.0, max(0.0, (progress - schedule.start_fraction) / span))
+    return normalized * normalized * (3.0 - 2.0 * normalized)
 
 
 class _MassCache:
@@ -63,10 +66,11 @@ class DomainRandomizationContext:
             cfg.foot_friction_delta,
             cfg.link_mass_fraction,
             cfg.push_torque_max_nm,
-            *cfg.push_force_min_n,
             *cfg.push_force_max_n,
         ) <= 0.0:
             raise ValueError("DR randomization ranges must be positive.")
+        if min(cfg.push_force_min_n) < 0.0:
+            raise ValueError("DR push force minimum magnitudes must be non-negative.")
         if any(lower > upper for lower, upper in zip(cfg.push_force_min_n, cfg.push_force_max_n)):
             raise ValueError("DR push force minimums must not exceed their maximums.")
         if cfg.ball_mass_fraction >= 1.0 or cfg.pd_gain_fraction >= 1.0 or cfg.link_mass_fraction >= 1.0:

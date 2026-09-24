@@ -183,7 +183,7 @@ Student policy 额外需要实现:
 - 动力学参数 DR: 手-球摩擦系数. 以 0.8 作为均值, 映射到 0, 上下浮动 [0.6, 1.0] 映射到 [-1.0, 1.0], 作为额外的 1-dim observation. 调整手部接触摩擦系数, 而不改篮球.
 - 动力学参数 DR: 脚-地摩擦系数. 以 0.9 作为均值, 映射到 0, 上下浮动 [0.6, 1.2] 映射到 [-1.0, 1.0], 作为额外的 1-dim observation. 调整脚部接触摩擦系数, 而不改地面.
 - 动力学参数 DR: link 质量. 以默认值作为均值, 映射到 0, 上下浮动 10%, 映射到 [-1.0, 1.0], 作为额外的 1-dim observation. 调节的 link 包括: `pelvis`, `left_hip_yaw_link`, `left_hip_roll_link`, `left_hip_pitch_link`, `left_knee_link`, `right_hip_yaw_link`, `right_hip_roll_link`, `right_hip_pitch_link`, `right_knee_link`. 9 个 link 共享比例, 作为额外的 1-dim observation.
-- 外部推力 DR: 向机器人的 `torso` link 施加随机推力于力矩. 没有额外的 observation. 作用力范围为 [-20.0, 20.0] N, 力矩范围为 [-3.0, 3.0] Nm. 用于训练的动作轨迹数据中已经新加入一个键值对 `["push_available", 0/1]`, 用于指示可以施加作用力的参考帧. 新动作轨迹文件为 `source/bb_mimic_nt/assets/trajectory/shoot_batch_0918.pkl`. 只有在轨迹数据对应的帧为可施加推力的时候才施加外部推力. 补齐对应的动作数据处理与缓存逻辑. 目前框架有对机器人的随机推动, 删除当前的零散代码, 统一整合到框架中. 外部推力为脉冲力, 持续时间 200 ms, `push_available` 优先级更高. 推力和力矩三轴采样.
+- 外部推力 DR: 向机器人的 `torso` link 施加随机推力于力矩. 没有额外的 observation. 作用力范围为 [-20.0, 20.0] N, 力矩范围为 [-3.0, 3.0] Nm. 用于训练的动作轨迹数据中已经新加入一个键值对 `["push_available", 0/1]`, 用于指示可以施加作用力的参考帧. 新动作轨迹文件为 `source/bb_mimic_nt/assets/trajectory/shoot_batch_0922.pkl`. 只有在轨迹数据对应的帧为可施加推力的时候才施加外部推力. 补齐对应的动作数据处理与缓存逻辑. 目前框架有对机器人的随机推动, 删除当前的零散代码, 统一整合到框架中. 外部推力为脉冲力, 持续时间 200 ms, `push_available` 优先级更高. 推力和力矩三轴采样.
 
 上述除推力外, 6 个 DR 项目各占 1 维, Teacher Policy 的 Observation 空间共计新增 6 维特权特征, 请在配置中正确扩展对应的 Observation 维度.
 

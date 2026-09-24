@@ -25,10 +25,20 @@ TRACKED_BODY_NAMES = (
     "right_hand",
     "left_ankle_roll_link",
     "right_ankle_roll_link",
+    "left_shoulder_yaw_link",
+    "right_shoulder_yaw_link",
+    "left_elbow_link",
+    "right_elbow_link",
+    "left_hip_yaw_link",
+    "right_hip_yaw_link",
+    "left_knee_link",
+    "right_knee_link",
 )
 # Root-local rotation tracking only. Add (body name, relative weight) here;
 # these bodies do not enter link-position tracking or policy observations.
-ROTATION_ONLY_TRACKING_BODIES = (("torso_link", 1.0),)
+ROTATION_ONLY_TRACKING_BODIES = (
+    ("torso_link", 1.0),
+)
 CONTACT_NAMES = (
     "left_hand_ball",
     "right_hand_ball",

@@ -68,7 +68,7 @@ def reference_dof_error(env, maximum_rmse: float = 1.0, command_name: str = "mot
     return torch.sqrt(torch.mean(error**2, dim=-1)) > maximum_rmse
 
 
-def interaction_tracking_error(env, maximum_distance: float = 0.35, command_name: str = "motion") -> torch.Tensor:
+def interaction_tracking_error(env, maximum_distance: float = 0.08, command_name: str = "motion") -> torch.Tensor:
     term = _motion(env, command_name)
     distance = torch.linalg.vector_norm(term.actual_anchor_pos_w() - term.ball.data.root_pos_w[:, None], dim=-1)
     required = term.reference["contact"][:, :2] > 0.5

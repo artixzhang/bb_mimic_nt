@@ -12,9 +12,9 @@ from pathlib import Path
 from bb_mimic_nt.trajectory import preprocess_motion_batch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_INPUT = PROJECT_ROOT / "source/bb_mimic_nt/assets/trajectory/shoot_batch_0918.pkl"
-DEFAULT_OUTPUT = PROJECT_ROOT / "source/bb_mimic_nt/assets/trajectory/shoot_batch_0918_processed.pt"
-DEFAULT_URDF = PROJECT_ROOT / "source/bb_mimic_nt/assets/robots/g1/urdf/unitree_g1_bb.urdf"
+DEFAULT_INPUT = PROJECT_ROOT / "source/bb_mimic_nt/assets/trajectory/shoot.pkl"
+DEFAULT_OUTPUT = PROJECT_ROOT / "source/bb_mimic_nt/assets/trajectory/shoot_processed.pt"
+DEFAULT_URDF = PROJECT_ROOT / "source/bb_mimic_nt/assets/robots/g1/urdf/g1_29dof_mode16_bb.urdf"
 
 
 def main() -> None:

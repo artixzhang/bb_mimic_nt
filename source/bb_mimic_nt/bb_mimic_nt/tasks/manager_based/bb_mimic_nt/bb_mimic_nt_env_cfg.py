@@ -21,6 +21,8 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
 
+from bb_mimic_nt.training import TEACHER_HISTORY_LENGTH
+
 from bb_mimic_nt.objects import (
     BB_BALL_CFG,
     BB_BLANK_PLANE_CFG,
@@ -36,9 +38,9 @@ from . import mdp
 
 EXTENSION_ROOT = Path(__file__).resolve().parents[4]
 ASSET_ROOT = EXTENSION_ROOT / "assets"
-MOTION_SOURCE = ASSET_ROOT / "trajectory" / "shoot_batch_0918.pkl"
-MOTION_CACHE = ASSET_ROOT / "trajectory" / "shoot_batch_0918_processed.pt"
-ROBOT_URDF = ASSET_ROOT / "robots" / "g1" / "urdf" / "unitree_g1_bb.urdf"
+MOTION_SOURCE = ASSET_ROOT / "trajectory" / "shoot_batch_0922.pkl"
+MOTION_CACHE = ASSET_ROOT / "trajectory" / "shoot_batch_0922_processed.pt"
+ROBOT_URDF = ASSET_ROOT / "robots" / "g1" / "urdf" / "g1_29dof_mode16_bb.urdf"
 
 
 @configclass
@@ -46,6 +48,19 @@ class DRScheduleCfg:
     enabled: bool = True
     start_fraction: float = 0.20
     end_fraction: float = 0.60
+    full_strength: bool = False
+
+
+@configclass
+class DRPushScheduleCfg:
+    enabled: bool = True
+    start_fraction: float = 0.30
+    end_fraction: float = 0.80
+    full_strength: bool = False
+
+@configclass
+class DRDisabledCfg:
+    enabled: bool = False
 
 
 @configclass
@@ -61,17 +76,26 @@ class DomainRandomizationCfg:
     foot_friction_nominal: float = 0.9
     foot_friction_delta: float = 0.3
     link_mass_fraction: float = 0.10
-    push_force_min_n: tuple[float, float, float] = (30.0, 30.0, 5.0)
-    push_force_max_n: tuple[float, float, float] = (50.0, 50.0, 10.0)
+    push_force_min_n: tuple[float, float, float] = (5.0, 5.0, 2.0)
+    push_force_max_n: tuple[float, float, float] = (15.0, 15.0, 5.0)
     push_torque_max_nm: float = 3.0
-    push_duration_s: float = 1.0
-    delay: DRScheduleCfg = DRScheduleCfg()
-    ball_mass: DRScheduleCfg = DRScheduleCfg()
-    pd_gains: DRScheduleCfg = DRScheduleCfg()
-    hand_friction: DRScheduleCfg = DRScheduleCfg()
-    foot_friction: DRScheduleCfg = DRScheduleCfg()
-    link_mass: DRScheduleCfg = DRScheduleCfg()
-    push: DRScheduleCfg = DRScheduleCfg()
+    push_duration_s: float = 0.5
+
+    # delay: DRScheduleCfg = DRScheduleCfg()
+    # ball_mass: DRScheduleCfg = DRScheduleCfg()
+    # pd_gains: DRScheduleCfg = DRScheduleCfg()
+    # hand_friction: DRScheduleCfg = DRScheduleCfg()
+    # foot_friction: DRScheduleCfg = DRScheduleCfg()
+    # link_mass: DRScheduleCfg = DRScheduleCfg()
+    # push: DRScheduleCfg = DRPushScheduleCfg()
+
+    delay: DRScheduleCfg = DRDisabledCfg()
+    ball_mass: DRScheduleCfg = DRDisabledCfg()
+    pd_gains: DRScheduleCfg = DRDisabledCfg()
+    hand_friction: DRScheduleCfg = DRDisabledCfg()
+    foot_friction: DRScheduleCfg = DRDisabledCfg()
+    link_mass: DRScheduleCfg = DRDisabledCfg()
+    push: DRScheduleCfg = DRDisabledCfg()
 
 
 @configclass
@@ -167,11 +191,9 @@ class ObservationsCfg:
         reference_ball_linear_velocity = ObsTerm(func=mdp.reference_object_lin_vel_b)
         reference_contact = ObsTerm(func=mdp.reference_contact)
 
-        # Three-frame history: 183. CircularBuffer fills all slots with the
-        # first sample following a reset.
-        gravity_history = ObsTerm(func=mdp.gravity_vec_b, history_length=3)
-        joint_position_history = ObsTerm(func=mdp.dof_pos, history_length=3)
-        action_history = ObsTerm(func=mdp.previous_action, history_length=3)
+        gravity_history = ObsTerm(func=mdp.gravity_vec_b, history_length=TEACHER_HISTORY_LENGTH)
+        joint_position_history = ObsTerm(func=mdp.dof_pos, history_length=TEACHER_HISTORY_LENGTH)
+        action_history = ObsTerm(func=mdp.previous_action, history_length=TEACHER_HISTORY_LENGTH)
         phase = ObsTerm(func=mdp.phase)
         reference_speed = ObsTerm(func=mdp.reference_speed)
         domain_randomization = ObsTerm(func=mdp.dr_privileged_observation)
@@ -209,7 +231,7 @@ class TerminationsCfg:
     dof_tracking_error = DoneTerm(func=mdp.reference_dof_error, params={"maximum_rmse": 1.0})
     interaction_tracking_error = DoneTerm(
         func=mdp.interaction_tracking_error,
-        params={"maximum_distance": 0.35},
+        params={"maximum_distance": 0.08},
     )
 
 

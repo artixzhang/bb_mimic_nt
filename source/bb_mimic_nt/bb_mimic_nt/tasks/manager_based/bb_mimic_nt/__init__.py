@@ -31,3 +31,23 @@ gym.register(
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1ShootPPORunnerCfg",
     },
 )
+
+gym.register(
+    id="BbMimicNT-G1-Shoot-Student-DAgger-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.bb_mimic_nt_student_env_cfg:G1ShootStudentEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_dagger_cfg:G1ShootStudentDAggerCfg",
+    },
+)
+
+gym.register(
+    id="BbMimicNT-G1-Shoot-Student-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.bb_mimic_nt_student_env_cfg:G1ShootStudentPlayEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_dagger_cfg:G1ShootStudentDAggerCfg",
+    },
+)
