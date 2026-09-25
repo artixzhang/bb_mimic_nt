@@ -46,15 +46,15 @@ ROBOT_URDF = ASSET_ROOT / "robots" / "g1" / "urdf" / "g1_29dof_mode16_bb.urdf"
 @configclass
 class DRScheduleCfg:
     enabled: bool = True
-    start_fraction: float = 0.20
-    end_fraction: float = 0.60
+    start_fraction: float = 0.30
+    end_fraction: float = 0.70
     full_strength: bool = False
 
 
 @configclass
 class DRPushScheduleCfg:
     enabled: bool = True
-    start_fraction: float = 0.30
+    start_fraction: float = 0.40
     end_fraction: float = 0.80
     full_strength: bool = False
 
@@ -81,21 +81,21 @@ class DomainRandomizationCfg:
     push_torque_max_nm: float = 3.0
     push_duration_s: float = 0.5
 
-    # delay: DRScheduleCfg = DRScheduleCfg()
-    # ball_mass: DRScheduleCfg = DRScheduleCfg()
-    # pd_gains: DRScheduleCfg = DRScheduleCfg()
-    # hand_friction: DRScheduleCfg = DRScheduleCfg()
-    # foot_friction: DRScheduleCfg = DRScheduleCfg()
-    # link_mass: DRScheduleCfg = DRScheduleCfg()
-    # push: DRScheduleCfg = DRPushScheduleCfg()
+    delay: DRScheduleCfg = DRScheduleCfg()
+    ball_mass: DRScheduleCfg = DRScheduleCfg()
+    pd_gains: DRScheduleCfg = DRScheduleCfg()
+    hand_friction: DRScheduleCfg = DRScheduleCfg()
+    foot_friction: DRScheduleCfg = DRScheduleCfg()
+    link_mass: DRScheduleCfg = DRScheduleCfg()
+    push: DRScheduleCfg = DRPushScheduleCfg()
 
-    delay: DRScheduleCfg = DRDisabledCfg()
-    ball_mass: DRScheduleCfg = DRDisabledCfg()
-    pd_gains: DRScheduleCfg = DRDisabledCfg()
-    hand_friction: DRScheduleCfg = DRDisabledCfg()
-    foot_friction: DRScheduleCfg = DRDisabledCfg()
-    link_mass: DRScheduleCfg = DRDisabledCfg()
-    push: DRScheduleCfg = DRDisabledCfg()
+    # delay: DRScheduleCfg = DRDisabledCfg()
+    # ball_mass: DRScheduleCfg = DRDisabledCfg()
+    # pd_gains: DRScheduleCfg = DRDisabledCfg()
+    # hand_friction: DRScheduleCfg = DRDisabledCfg()
+    # foot_friction: DRScheduleCfg = DRDisabledCfg()
+    # link_mass: DRScheduleCfg = DRDisabledCfg()
+    # push: DRScheduleCfg = DRDisabledCfg()
 
 
 @configclass
