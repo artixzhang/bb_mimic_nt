@@ -44,7 +44,15 @@ ROBOT_URDF = ASSET_ROOT / "robots" / "g1" / "urdf" / "g1_29dof_mode16_bb.urdf"
 
 
 @configclass
-class DRScheduleCfg:
+class DRPhysicsScheduleCfg:
+    enabled: bool = True
+    start_fraction: float = 0.10
+    end_fraction: float = 0.60
+    full_strength: bool = False
+
+
+@configclass
+class DRLatencyScheduleCfg:
     enabled: bool = True
     start_fraction: float = 0.30
     end_fraction: float = 0.70
@@ -54,7 +62,7 @@ class DRScheduleCfg:
 @configclass
 class DRPushScheduleCfg:
     enabled: bool = True
-    start_fraction: float = 0.40
+    start_fraction: float = 0.15
     end_fraction: float = 0.80
     full_strength: bool = False
 
@@ -76,18 +84,18 @@ class DomainRandomizationCfg:
     foot_friction_nominal: float = 0.9
     foot_friction_delta: float = 0.3
     link_mass_fraction: float = 0.10
-    push_force_min_n: tuple[float, float, float] = (5.0, 5.0, 2.0)
-    push_force_max_n: tuple[float, float, float] = (15.0, 15.0, 5.0)
-    push_torque_max_nm: float = 3.0
-    push_duration_s: float = 0.5
+    push_force_min_n: tuple[float, float, float] = (8.0, 8.0, 3.0)
+    push_force_max_n: tuple[float, float, float] = (20.0, 20.0, 8.0)
+    push_torque_max_nm: float = 5.0
+    push_duration_s: float = 0.8
 
-    delay: DRScheduleCfg = DRScheduleCfg()
-    ball_mass: DRScheduleCfg = DRScheduleCfg()
-    pd_gains: DRScheduleCfg = DRScheduleCfg()
-    hand_friction: DRScheduleCfg = DRScheduleCfg()
-    foot_friction: DRScheduleCfg = DRScheduleCfg()
-    link_mass: DRScheduleCfg = DRScheduleCfg()
-    push: DRScheduleCfg = DRPushScheduleCfg()
+    delay: DRLatencyScheduleCfg = DRLatencyScheduleCfg()
+    ball_mass: DRPhysicsScheduleCfg = DRPhysicsScheduleCfg()
+    pd_gains: DRPhysicsScheduleCfg = DRPhysicsScheduleCfg()
+    hand_friction: DRPhysicsScheduleCfg = DRPhysicsScheduleCfg()
+    foot_friction: DRPhysicsScheduleCfg = DRPhysicsScheduleCfg()
+    link_mass: DRPhysicsScheduleCfg = DRPhysicsScheduleCfg()
+    push: DRPushScheduleCfg = DRPushScheduleCfg()
 
     # delay: DRScheduleCfg = DRDisabledCfg()
     # ball_mass: DRScheduleCfg = DRDisabledCfg()
@@ -291,5 +299,7 @@ class G1ShootPlayEnvCfg(G1ShootEnvCfg):
         self.commands.motion.enable_rsi = False
         self.commands.motion.randomize_clip = False
         self.commands.motion.enable_adaptive_speed = False
+        self.commands.motion.reset_dof_pos_noise = 0.0
+        self.commands.motion.reset_dof_vel_noise = 0.0
         for name in ("delay", "ball_mass", "pd_gains", "hand_friction", "foot_friction", "link_mass", "push"):
             getattr(self.dr, name).enabled = False

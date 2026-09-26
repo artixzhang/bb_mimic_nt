@@ -260,12 +260,23 @@ class MotionReferenceCommand(CommandTerm):
         )
         self.robot.write_root_pose_to_sim(root_pose, env_ids=env_ids)
         self.robot.write_root_link_velocity_to_sim(root_velocity, env_ids=env_ids)
+
+        dof_noise = (torch.rand_like(self.reference["dof_pos"][env_ids]) * 2.0 - 1.0) * self.cfg.reset_dof_pos_noise
+        init_dof_pos = self.reference["dof_pos"][env_ids] + dof_noise
+        limits = self.robot.data.joint_pos_limits[env_ids[:, None], self.joint_ids]
+        init_dof_pos = init_dof_pos.clamp(limits[..., 0], limits[..., 1])
+
+        init_dof_vel = self.reference["dof_vel"][env_ids] + (
+            torch.rand_like(self.reference["dof_vel"][env_ids]) * 2.0 - 1.0
+        ) * self.cfg.reset_dof_vel_noise
+
         self.robot.write_joint_state_to_sim(
-            self.reference["dof_pos"][env_ids],
-            self.reference["dof_vel"][env_ids],
+            init_dof_pos,
+            init_dof_vel,
             joint_ids=self.joint_ids,
             env_ids=env_ids,
         )
+
         ball_pose = torch.cat(
             (self.reference["object_pos"][env_ids] + origin, self.reference["object_quat"][env_ids]), dim=-1
         )
@@ -655,3 +666,5 @@ class MotionReferenceCommandCfg(CommandTermCfg):
     speed_update_interval_s: float = 0.10
     success_radius: float = 0.20
     resampling_time_range: tuple[float, float] = (1.0e9, 1.0e9)
+    reset_dof_pos_noise: float = 0.05
+    reset_dof_vel_noise: float = 0.05  # rad/s 初速度扰动

@@ -116,9 +116,9 @@ def contact_graph_reward(
 @configclass
 class UnifiedRewardCfg:
     # body, obj, relative, contact
-    global_weights: tuple[float, float, float, float] = (0.45, 0.25, 0.25, 0.15)
+    global_weights: tuple[float, float, float, float] = (0.45, 0.30, 0.15, 0.15)
     # root, joint, link, rotation_only
-    body_weights: tuple[float, float, float, float] = (0.30, 0.33, 0.27, 0.10)
+    body_weights: tuple[float, float, float, float] = (0.30, 0.30, 0.30, 0.10)
     # position, rotation, linear_velocity, angular_velocity
     root_weights: tuple[float, float, float, float] = (0.50, 0.30, 0.15, 0.05)
     joint_weights: tuple[float, float] = (0.70, 0.30)
@@ -126,7 +126,7 @@ class UnifiedRewardCfg:
 
     # position, direction, speed_magnitude, rotation
     object_weights: tuple[float, float, float, float] = (0.45, 0.35, 0.2, 0.0)
-    object_sigmas: tuple[float, float, float, float] = (8.0, 6.0, 0.5, 1.0)
+    object_sigmas: tuple[float, float, float, float] = (20.0, 8.0, 2.0, 1.0)
 
     relative_weights: tuple[float, float] = (1.0, 0.0)
     root_sigmas: tuple[float, float, float, float] = (40.0, 10.0, 2.0, 0.5)
@@ -134,19 +134,22 @@ class UnifiedRewardCfg:
     link_sigmas: tuple[float, float] = (40.0, 5.0)
     rotation_only_sigma: float = 5.0
     relative_sigmas: tuple[float, float] = (40.0, 1.0)
-    hand_contact_sensitivity: float = 2.0
+
+    hand_contact_distance: float = 0.02
+    hand_contact_sensitivity: float = 1.0
     foot_contact_sensitivity: float = 1.0
     hand_contact_force: float = 1.0
     foot_contact_force: float = 5.0
     foot_airborne_height_tolerance: float = 0.05
     foot_airborne_height_weight: float = 0.50
+    
     action_magnitude_weight: float = 0.05
     action_rate_weight: float = 0.3
     target_residual_rate_weight: float = 0.05
     torque_weight: float = 1.0e-5
     limit_weight: float = 0.05
     joint_velocity_error_weight: float = 0.001
-    joint_jerk_weight: float = 2.0e-10
+    joint_jerk_weight: float = 1.0e-8
     regularization_clip: float = 0.5
     termination_penalty: float = 100.0
 
@@ -348,7 +351,13 @@ class UnifiedMimicReward(ManagerTermBase):
         }
         relative = normalized_weighted_sum(tuple(relative_parts.values()), settings.relative_weights)
 
-        actual_contact = contact_graph(env, settings.hand_contact_force, settings.foot_contact_force)
+        actual_contact = contact_graph(
+            env,
+            settings.hand_contact_force,
+            settings.foot_contact_force,
+            settings.hand_contact_distance,
+            command_name=command_name,
+        )
         contact = contact_graph_reward(
             actual_contact,
             reference["contact"],
