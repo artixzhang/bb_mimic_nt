@@ -8,12 +8,14 @@
 - 确定性播放环境：`BbMimicNT-G1-Shoot-Play-v0`
 - 仿真 / 策略频率：200 Hz / 100 Hz（decimation 2）
 - 动作：29 维 reference-relative PD residual；Gaussian policy 输出经 `tanh` 约束，最终 PD 目标限制在机械关节限位内，再按每环境 0–4 个策略步延迟执行
-- Teacher observation：固定 479 维，包含当前状态、reference pose/velocity/contact、历史、phase、reference speed 和 6 维 DR 特权参数
-- 原始轨迹：`source/bb_mimic_nt/assets/trajectory/shoot_batch_0922.pkl`
-- 预处理缓存：同目录 `shoot_batch_0922_processed.pt`（自动生成并被 Git 忽略）
+- Teacher observation：固定 674 维，包含当前状态、reference pose/velocity/contact、object-control state、历史、phase、reference speed 和 6 维 DR 特权参数
+- 原始轨迹：`source/bb_mimic_nt/assets/trajectory/shoot_batch_0928.pkl`
+- 预处理缓存：同目录 `shoot_batch_0928_processed.pt`（自动生成并被 Git 忽略）
 - 场景资产配置：`source/bb_mimic_nt/bb_mimic_nt/objects/`；环境直接复用其中的篮球、floating hoop 和地面配置
 
-轨迹被解释为每个并行环境自己的 local-world 坐标；写入仿真时才叠加 env origin。缓存包含 schema、源文件与 URDF 哈希、有效长度、padding mask、29 DoF、四路 contact、逐帧 `push_available`、FK link / hand anchor 及差分速度。哈希或 schema 过期时，训练会自动重建。
+轨迹被解释为每个并行环境自己的 local-world 坐标；写入仿真时才叠加 env origin。缓存包含 schema、源文件与 URDF 哈希、有效长度、padding mask、29 DoF、四路 contact、逐帧 `push_available`、`release`、FK link / hand anchor 及差分速度。哈希或 schema 过期时，训练会自动重建。
+
+每个原始 clip 可提供长度为帧数的二值 `release`：`0` 表示持球/控制阶段，`1` 表示自由/已释放；`0 -> 1` 是出手/释放事件，`1 -> 0` 是拿球事件。它与瞬时接触标签相互独立，因此可以表达拍球、再次接球和传球等多段交互。旧轨迹若没有该字段，预处理器会以“无左右手 contact”生成兼容值；新数据建议显式标注。
 
 ## 安装与预处理
 
@@ -28,8 +30,8 @@ python scripts/preprocess_trajectory.py
 
 ```bash
 python scripts/preprocess_trajectory.py \
-  --input source/bb_mimic_nt/assets/trajectory/shoot_batch_0922.pkl \
-  --output source/bb_mimic_nt/assets/trajectory/shoot_batch_0922_processed.pt \
+  --input source/bb_mimic_nt/assets/trajectory/shoot_batch_0928.pkl \
+  --output source/bb_mimic_nt/assets/trajectory/shoot_batch_0928_processed.pt \
   --force
 ```
 
@@ -69,7 +71,7 @@ python scripts/rsl_rl/train.py \
 
 外力每次 rollout 最多触发一次，起点从当前 RSI 帧之后的 `push_available=1` 参考帧均匀选取。标记变为 0 时立即停止脉冲。播放和评估关闭随机化及外力，保留固定 2 步执行延迟。
 
-TensorBoard 除 reward/termination 外，还记录 `Metrics/motion/error/*` 的原始 reference tracking error，以及 `Metrics/motion/control/*` 的 action 变化、PD target 变化、action 饱和率、关节速度和力矩占比。这些指标带有物理单位，适合排查 reward 上升但动作抖动的问题。
+TensorBoard 除 reward/termination 外，还记录 `Metrics/motion/error/*` 的原始 reference tracking error，以及 `Metrics/motion/control/*` 的 action 变化、PD target 变化、action 饱和率、关节速度和力矩占比。`Metrics/motion/phase/{controlled,free}/*` 按 `release` 分段汇总，`error/joint/*` 与 `control/joint/*` 提供逐关节误差和动作幅度。这些指标带有物理单位，适合排查 reward 上升但动作抖动的问题。
 
 `reg/joint_jerk` 根据连续三个 100 Hz 策略步的关节速度计算加速度变化率，reset 后前两步不计罚。默认权重为 `2e-10`，训练时可通过 `Reward/reg/joint_jerk` 监控原始代价。
 

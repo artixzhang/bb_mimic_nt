@@ -30,13 +30,15 @@ from bb_mimic_nt.trajectory.processing import (
     _quat_to_matrix,
     finite_difference,
     quaternion_angular_velocity,
+    release_edges,
+    resolve_release_signal,
     validate_motion_batch,
 )
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ASSET_ROOT = PROJECT_ROOT / "source/bb_mimic_nt/assets"
-SOURCE = ASSET_ROOT / "trajectory/shoot_batch_0922.pkl"
+SOURCE = ASSET_ROOT / "trajectory/shoot_batch_0928.pkl"
 URDF = ASSET_ROOT / "robots/g1/urdf/g1_29dof_mode16_bb.urdf"
 
 
@@ -45,7 +47,7 @@ def test_real_batch_validation_contact_reordering_padding_and_hashes(tmp_path: P
     cache_path = tmp_path / "motion.pt"
     preprocess_motion_batch(SOURCE, URDF, cache_path)
     cache = load_motion_batch(cache_path)
-    assert len(raw) == 100
+    assert len(raw) == cache["metadata"]["num_clips"]
     assert len(dof_names) == 29
     assert dof_names == EXPECTED_DOF_NAMES
     assert cache["metadata"]["schema_version"] == CACHE_SCHEMA_VERSION
@@ -57,10 +59,16 @@ def test_real_batch_validation_contact_reordering_padding_and_hashes(tmp_path: P
     assert cache_is_current(cache_path, SOURCE, URDF)
     assert cache["anchor_pos_b"].shape[-2:] == (2, 3)
     assert cache["push_available"].shape == cache["valid"].shape
+    assert cache["release"].shape == cache["valid"].shape
+    assert cache["release_rising"].shape == cache["valid"].shape
+    assert cache["release_falling"].shape == cache["valid"].shape
 
     length = int(cache["lengths"][0])
     source_indices = [tuple(raw[0]["contact_names"]).index(name) for name in CONTACT_NAMES]
     assert np.array_equal(cache["contact"][0, :length].numpy(), np.asarray(raw[0]["contact"])[:, source_indices])
+    assert np.array_equal(
+        cache["release"][0, :length].numpy(), np.asarray(raw[0]["release"], dtype=np.float32)
+    )
     assert np.array_equal(cache["push_available"][0, :length].numpy(), np.asarray(raw[0]["push_available"]))
     assert torch.all(cache["valid"][0, :length])
     assert not torch.any(cache["valid"][0, length:])
@@ -89,6 +97,34 @@ def test_push_available_requires_one_binary_value_per_frame() -> None:
         validate_motion_batch([clip])
     clip["push_available"] = np.full(len(clip["root_pos"]), 0.5, dtype=np.float32)
     with pytest.raises(ValueError, match="push_available labels must be binary"):
+        validate_motion_batch([clip])
+
+
+def test_optional_release_signal_is_binary_and_edges_support_repeated_interactions() -> None:
+    clip = copy.deepcopy(joblib.load(SOURCE)[0])
+    signal = np.zeros(len(clip["root_pos"]), dtype=np.float32)
+    signal[2:5] = 1.0
+    signal[7:9] = 1.0
+    clip["release"] = signal
+    validate_motion_batch([clip])
+    _, contact = reorder_clip_channels(clip)
+    assert np.array_equal(resolve_release_signal(clip, contact), signal)
+    legacy_clip = copy.deepcopy(clip)
+    legacy_clip.pop("release")
+    expected_legacy = (~np.any(contact[:, :2] > 0.5, axis=-1)).astype(np.float32)
+    assert np.array_equal(resolve_release_signal(legacy_clip, contact), expected_legacy)
+    release, pickup = release_edges(signal)
+    assert np.flatnonzero(release).tolist() == [2, 7]
+    assert np.flatnonzero(pickup).tolist() == [5, 9]
+    initial_hold_release, initial_hold_pickup = release_edges(np.array([0.0, 0.0, 1.0]))
+    assert np.flatnonzero(initial_hold_release).tolist() == [2]
+    assert not np.any(initial_hold_pickup)
+
+    clip["release"] = np.full(len(signal), 0.5, dtype=np.float32)
+    with pytest.raises(ValueError, match="release labels must be binary"):
+        validate_motion_batch([clip])
+    clip["release"] = signal[:-1]
+    with pytest.raises(ValueError, match="release.*shape"):
         validate_motion_batch([clip])
 
 
@@ -140,7 +176,7 @@ def test_pinocchio_fk_world_and_root_local_are_consistent() -> None:
         TRACKED_BODY_NAMES,
         {"left_hand": (0.082, -0.115, 0.0), "right_hand": (0.082, 0.115, 0.0)},
     )
-    assert result["link_pos_w"].shape == (frame_count, 4, 3)
+    assert result["link_pos_w"].shape == (frame_count, len(TRACKED_BODY_NAMES), 3)
     assert np.all(np.isfinite(result["link_quat_w"]))
     rotation = _quat_to_matrix(root_quat)
     reconstructed = root_pos[:, None] + np.einsum("tij,tkj->tki", rotation, result["link_pos_b"])
@@ -187,6 +223,9 @@ def test_cache_hash_invalidation(tmp_path: Path) -> None:
                 "contact_names": list(CONTACT_NAMES),
             },
             "push_available": torch.zeros(1, 1),
+            "release": torch.zeros(1, 1),
+            "release_rising": torch.zeros(1, 1),
+            "release_falling": torch.zeros(1, 1),
             "valid": torch.ones(1, 1, dtype=torch.bool),
         },
         cache_path,

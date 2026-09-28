@@ -64,6 +64,10 @@ def student_apply_teacher_config(env_cfg, checkpoint: Path) -> tuple[dict, dict]
         "position_limit_margin",
     ):
         setattr(env_cfg.actions.joint_pos, name, float(teacher_action[name]))
+    env_cfg.actions.joint_pos.joint_maximum_residual_scales = {
+        str(name): float(value)
+        for name, value in teacher_action.get("joint_maximum_residual_scales", {}).items()
+    }
     teacher_dr = environment["dr"]
     scalar_names = (
         "delay_nominal_steps",
@@ -98,6 +102,15 @@ def student_validate_teacher(environment: dict, env) -> None:
     ):
         if abs(float(archived_action[name]) - float(getattr(action.cfg, name))) > 1.0e-8:
             raise ValueError(f"Teacher action setting {name} differs from the Student adapter.")
+    archived_caps = {
+        str(name): float(value)
+        for name, value in archived_action.get("joint_maximum_residual_scales", {}).items()
+    }
+    current_caps = {
+        str(name): float(value) for name, value in action.cfg.joint_maximum_residual_scales.items()
+    }
+    if archived_caps != current_caps:
+        raise ValueError("Teacher per-joint residual caps differ from the Student adapter.")
     dimensions = env.observation_manager.group_obs_dim
     expected = {"policy": (STUDENT_OBSERVATION_DIM,), "teacher": (TEACHER_OBSERVATION_DIM,)}
     if any(dimensions.get(name) != shape for name, shape in expected.items()):
@@ -161,13 +174,19 @@ def student_metadata(env, student_cfg, teacher_checkpoint: Path | None = None) -
         "student_hidden_dims": list(student_cfg.policy.student_hidden_dims),
         "activation": student_cfg.policy.activation,
         "action_adapter": {
-            name: float(getattr(action.cfg, name))
-            for name in (
-                "residual_scale_fraction",
-                "minimum_residual_scale",
-                "maximum_residual_scale",
-                "position_limit_margin",
-            )
+            **{
+                name: float(getattr(action.cfg, name))
+                for name in (
+                    "residual_scale_fraction",
+                    "minimum_residual_scale",
+                    "maximum_residual_scale",
+                    "position_limit_margin",
+                )
+            },
+            "joint_maximum_residual_scales": {
+                str(name): float(value)
+                for name, value in action.cfg.joint_maximum_residual_scales.items()
+            },
         },
         "observation_settings": inference_observation,
         "training_observation_settings": training_observation,

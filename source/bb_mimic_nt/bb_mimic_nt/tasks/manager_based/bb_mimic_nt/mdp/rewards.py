@@ -172,6 +172,8 @@ class UnifiedRewardCfg:
     # position, direction, speed_magnitude, rotation
     object_weights: tuple[float, float, float, float] = (0.45, 0.35, 0.2, 0.0)
     object_sigmas: tuple[float, float, float, float] = (10.0, 5.0, 0.5, 1.0)
+    object_free_phase_weight: float = 0.15
+    relative_free_phase_weight: float = 0.0
 
     link_pos_body_weights: dict[str, float] = {
         "left_hand": 2.0, 
@@ -201,16 +203,18 @@ class UnifiedRewardCfg:
     foot_contact_sensitivity: float = 1.0
     hand_contact_force: float = 1.0
     foot_contact_force: float = 5.0
-    foot_airborne_height_tolerance: float = 0.04
-    foot_airborne_height_weight: float = 0.50
+    foot_airborne_height_tolerance: float = 0.0
+    foot_airborne_height_weight: float = 0.2
+    root_airborne_height_tolerance: float = 0.0
+    root_airborne_height_weight: float = 1.0
     
     action_magnitude_weight: float = 0.05
-    action_rate_weight: float = 0.30
+    action_rate_weight: float = 0.20
     target_residual_rate_weight: float = 0.05
     torque_weight: float = 1.0e-5
     limit_weight: float = 0.05
     joint_velocity_error_weight: float = 0.001
-    joint_jerk_weight: float = 1.0e-10
+    joint_jerk_weight: float = 1.0e-11
     regularization_clip: float = 0.5
     termination_penalty: float = 100.0
 
@@ -454,26 +458,53 @@ class UnifiedMimicReward(ManagerTermBase):
         reference_foot_height = (
             reference["link_pos_w"][:, foot_link_indices] + origin[:, None]
         )[:, :, 2]
+        reference_foot_contact = reference["contact"][:, foot_contact_indices]
         foot_airborne_height_shortfall = gated_height_shortfall_cost(
             actual_foot_height,
             reference_foot_height,
-            reference["contact"][:, foot_contact_indices],
+            reference_foot_contact,
             settings.foot_airborne_height_tolerance,
         )
         foot_airborne_height_penalty = settings.foot_airborne_height_weight * foot_airborne_height_shortfall
+        # Treat the root as supported whenever either reference foot is on the
+        # ground. The one-sided shortfall is therefore active only during the
+        # reference flight phase and cannot be satisfied by merely tucking the
+        # legs while leaving the pelvis low.
+        reference_root_support = torch.amax(reference_foot_contact, dim=-1)
+        actual_root_height = robot.data.root_link_pos_w[:, 2] - origin[:, 2]
+        root_airborne_height_shortfall = gated_height_shortfall_cost(
+            actual_root_height[:, None],
+            reference["root_pos"][:, 2, None],
+            reference_root_support[:, None],
+            settings.root_airborne_height_tolerance,
+        )
+        root_airborne_height_penalty = settings.root_airborne_height_weight * root_airborne_height_shortfall
+        object_control = term.object_control_active.float()
+        reward_active = term.motion_reward_active.float()
+        object_gate = reward_active * (
+            object_control + (1.0 - object_control) * settings.object_free_phase_weight
+        )
+        relative_gate = reward_active * (
+            object_control + (1.0 - object_control) * settings.relative_free_phase_weight
+        )
         mimic = gated_top_level_reward(
             body,
             obj,
             relative,
             contact,
-            term.object_reward_active.float(),
+            object_gate,
             settings.global_weights,
+            relative_gate=relative_gate,
         )
         joint_jerk = self._joint_jerk(robot.data.joint_vel[:, term.joint_ids])
         regularization = regularization_cost(term, settings, env, joint_jerk)
         termination = env.termination_manager.terminated.float() * settings.termination_penalty
         total = torch.nan_to_num(
-            mimic - regularization["reg/total"] - foot_airborne_height_penalty - termination,
+            mimic
+            - regularization["reg/total"]
+            - foot_airborne_height_penalty
+            - root_airborne_height_penalty
+            - termination,
             nan=-settings.termination_penalty,
             posinf=-settings.termination_penalty,
             neginf=-settings.termination_penalty,
@@ -492,10 +523,13 @@ class UnifiedMimicReward(ManagerTermBase):
                 "mimic/body/rotation_only": rotation_only,
                 "mimic/body": body,
                 "mimic/object": obj,
+                "mimic/object/gate": object_gate,
                 "mimic/relative": relative,
+                "mimic/relative/gate": relative_gate,
                 "mimic/contact": contact,
                 "mimic/total": mimic,
                 "penalty/foot_airborne_height": foot_airborne_height_penalty,
+                "penalty/root_airborne_height": root_airborne_height_penalty,
                 **regularization,
                 "termination": termination,
                 "total": total,

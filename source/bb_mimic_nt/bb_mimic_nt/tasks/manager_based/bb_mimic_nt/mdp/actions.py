@@ -13,7 +13,7 @@ from isaaclab.assets import Articulation
 from isaaclab.managers import ActionTerm, ActionTermCfg
 from isaaclab.utils import configclass
 
-from bb_mimic_nt.core import reference_residual_target
+from bb_mimic_nt.core import apply_joint_residual_caps, reference_residual_target
 
 from .events import get_dr_context
 
@@ -89,17 +89,12 @@ class ReferenceResidualJointPositionAction(ActionTerm):
             min=cfg.minimum_residual_scale,
             max=cfg.maximum_residual_scale,
         )
-
-        if cfg.arm_maximum_residual_scale is not None and cfg.arm_joint_keywords:
-            arm_mask = torch.tensor(
-                [any(k in name for k in cfg.arm_joint_keywords) for name in self._joint_names],
-                dtype=torch.bool,
-                device=self.device,
-            )
-            self._residual_scale[:, arm_mask] = self._residual_scale[:, arm_mask].clamp(
-                min=cfg.minimum_residual_scale,
-                max=cfg.arm_maximum_residual_scale
-            )
+        self._residual_scale = apply_joint_residual_caps(
+            self._residual_scale,
+            self._joint_names,
+            cfg.joint_maximum_residual_scales,
+            cfg.minimum_residual_scale,
+        )
 
         self._dr_context = get_dr_context(env)
         self.synchronize_reference()
@@ -197,8 +192,25 @@ class ReferenceResidualJointPositionActionCfg(ActionTermCfg):
     minimum_residual_scale: float = 0.10
     maximum_residual_scale: float = 0.80
     position_limit_margin: float = 0.050
-    arm_maximum_residual_scale: float | None = 0.30
-    arm_joint_keywords: tuple[str, ...] = ("shoulder", "elbow", "wrist")
+    joint_maximum_residual_scales: dict[str, float] = {
+        "left_hip_yaw_joint": 0.15,
+        "right_hip_yaw_joint": 0.15,
+        "waist_yaw_joint": 0.20,
+        "left_shoulder_pitch_joint": 0.35,
+        "left_shoulder_roll_joint": 0.25,
+        "left_shoulder_yaw_joint": 0.25,
+        "left_elbow_joint": 0.35,
+        "left_wrist_roll_joint": 0.20,
+        "left_wrist_pitch_joint": 0.20,
+        "left_wrist_yaw_joint": 0.20,
+        "right_shoulder_pitch_joint": 0.35,
+        "right_shoulder_roll_joint": 0.25,
+        "right_shoulder_yaw_joint": 0.25,
+        "right_elbow_joint": 0.35,
+        "right_wrist_roll_joint": 0.20,
+        "right_wrist_pitch_joint": 0.20,
+        "right_wrist_yaw_joint": 0.20,
+    }
 
 
 class StudentNominalJointPositionAction(ActionTerm):
@@ -239,6 +251,12 @@ class StudentNominalJointPositionAction(ActionTerm):
         self.residual_scale = ((self.upper - self.lower) * cfg.residual_scale_fraction).clamp(
             min=cfg.minimum_residual_scale,
             max=cfg.maximum_residual_scale,
+        )
+        self.residual_scale = apply_joint_residual_caps(
+            self.residual_scale,
+            self._joint_names,
+            cfg.joint_maximum_residual_scales,
+            cfg.minimum_residual_scale,
         )
         history_length = env.cfg.dr.delay_nominal_steps + env.cfg.dr.delay_max_offset_steps + 1
         self._target_history = torch.zeros((history_length, *shape), device=self.device)
@@ -343,3 +361,6 @@ class StudentNominalJointPositionActionCfg(ActionTermCfg):
     minimum_residual_scale: float = 0.10
     maximum_residual_scale: float = 0.50
     position_limit_margin: float = 0.020
+    # Filled from the archived Teacher config for DAgger/evaluation. Keeping
+    # this empty by default preserves compatibility with older Student exports.
+    joint_maximum_residual_scales: dict[str, float] = {}

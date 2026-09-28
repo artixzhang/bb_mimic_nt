@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import torch
 
@@ -21,6 +21,32 @@ def reference_residual_target(
     """Convert a normalized residual action into a safe reference-relative target."""
     desired = reference + action.clamp(-1.0, 1.0) * residual_scale
     return torch.maximum(torch.minimum(desired, upper), lower)
+
+
+def apply_joint_residual_caps(
+    residual_scale: torch.Tensor,
+    joint_names: Sequence[str],
+    maximum_by_joint: Mapping[str, float],
+    minimum_scale: float,
+) -> torch.Tensor:
+    """Apply validated, exact-name residual caps without changing unspecified joints."""
+    if residual_scale.shape[-1] != len(joint_names):
+        raise ValueError("Residual scale width must match the joint-name count.")
+    unknown = set(maximum_by_joint).difference(joint_names)
+    if unknown:
+        raise ValueError(f"Residual caps contain unknown joints: {sorted(unknown)}")
+    result = residual_scale.clone()
+    for index, name in enumerate(joint_names):
+        if name not in maximum_by_joint:
+            continue
+        maximum = float(maximum_by_joint[name])
+        if not math.isfinite(maximum) or maximum < minimum_scale:
+            raise ValueError(
+                f"Residual cap for {name!r} must be finite and at least minimum_residual_scale "
+                f"({minimum_scale}), got {maximum}."
+            )
+        result[..., index].clamp_(max=maximum)
+    return result
 
 
 def slerp_wxyz(first: torch.Tensor, second: torch.Tensor, blend: torch.Tensor) -> torch.Tensor:
@@ -134,11 +160,14 @@ def gated_top_level_reward(
     contact: torch.Tensor,
     gate: torch.Tensor,
     weights: Sequence[float],
+    relative_gate: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    if relative_gate is None:
+        relative_gate = gate
     values = torch.stack((body, obj, relative, contact), dim=-1)
     weight = values.new_tensor(weights).expand_as(values).clone()
     weight[:, 1] *= gate
-    weight[:, 2] *= gate
+    weight[:, 2] *= relative_gate
     weight = torch.where(weight > 0.0, weight, torch.zeros_like(weight))
     return torch.sum(values * weight, dim=-1) / weight.sum(dim=-1).clamp_min(1.0e-8)
 

@@ -18,7 +18,7 @@ import joblib
 import numpy as np
 import torch
 
-CACHE_SCHEMA_VERSION = 3
+CACHE_SCHEMA_VERSION = 5
 
 TRACKED_BODY_NAMES = (
     "left_hand",
@@ -253,6 +253,16 @@ def _validate_clip(clip: dict[str, Any], clip_index: int) -> None:
     push_available = np.asarray(clip["push_available"])
     if not np.all(np.logical_or(push_available == 0.0, push_available == 1.0)):
         raise ValueError(f"Clip {clip_index} push_available labels must be binary.")
+    if "release" in clip:
+        release = np.asarray(clip["release"])
+        if release.shape != (frame_count,):
+            raise ValueError(
+                f"Clip {clip_index} field 'release' has shape {release.shape}; expected {(frame_count,)}."
+            )
+        if not np.all(np.isfinite(release)):
+            raise ValueError(f"Clip {clip_index} field 'release' contains NaN or Inf.")
+        if not np.all(np.logical_or(np.isclose(release, 0.0), np.isclose(release, 1.0))):
+            raise ValueError(f"Clip {clip_index} release labels must be binary.")
 
     for field in ("root_rot", "obj_rot"):
         norms = np.linalg.norm(np.asarray(clip[field], dtype=np.float64), axis=-1)
@@ -271,6 +281,28 @@ def reorder_clip_channels(clip: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]
         np.asarray(clip["dof"], dtype=np.float32)[:, dof_indices],
         np.asarray(clip["contact"], dtype=np.float32)[:, contact_indices],
     )
+
+
+def resolve_release_signal(clip: dict[str, Any], contact: np.ndarray) -> np.ndarray:
+    """Return the explicit object-control signal or a legacy contact-derived fallback.
+
+    ``release == 0`` means held/controlled and ``release == 1`` means free.
+    Consequently, a 0->1 edge marks a release and a 1->0 edge marks a pickup.
+    The signal is deliberately independent from instantaneous contact so it can
+    bridge brief contact gaps in dribbling, passing, and other interactions.
+    """
+    if "release" in clip:
+        return np.asarray(clip["release"], dtype=np.float32)
+    return (~np.any(contact[:, :2] > 0.5, axis=-1)).astype(np.float32)
+
+
+def release_edges(release: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return release (rising) and pickup (falling) edge channels."""
+    release = np.asarray(release, dtype=np.float32)
+    previous = np.concatenate((release[:1], release[:-1]))
+    rising = np.logical_and(release > 0.5, previous <= 0.5).astype(np.float32)
+    falling = np.logical_and(release <= 0.5, previous > 0.5).astype(np.float32)
+    return rising, falling
 
 
 def validate_motion_batch(raw_batch: Any) -> tuple[list[dict[str, Any]], tuple[str, ...]]:
@@ -404,6 +436,12 @@ def cache_is_current(
             metadata["schema_version"] == CACHE_SCHEMA_VERSION
             and "push_available" in cache
             and cache["push_available"].shape == cache["valid"].shape
+            and "release" in cache
+            and cache["release"].shape == cache["valid"].shape
+            and "release_rising" in cache
+            and cache["release_rising"].shape == cache["valid"].shape
+            and "release_falling" in cache
+            and cache["release_falling"].shape == cache["valid"].shape
             and metadata["source_sha256"] == _sha256(source_path)
             and metadata["urdf_sha256"] == _sha256(urdf_path)
             and tuple(metadata["tracked_body_names"]) == tuple(tracked_body_names)
@@ -448,6 +486,8 @@ def preprocess_motion_batch(
         root_pos = np.asarray(clip["root_pos"], dtype=np.float32)
         root_quat = _normalize_quaternion_sequence(clip["root_rot"])
         dof_pos, contact = reorder_clip_channels(clip)
+        release = resolve_release_signal(clip, contact)
+        release_rising, release_falling = release_edges(release)
         object_pos = np.asarray(clip["obj_pos"], dtype=np.float32)
         object_quat = _normalize_quaternion_sequence(clip["obj_rot"])
         dt = 1.0 / float(clip["fps"])
@@ -481,6 +521,9 @@ def preprocess_motion_batch(
                 "object_lin_vel": finite_difference(object_pos, dt),
                 "object_ang_vel": quaternion_angular_velocity(object_quat, dt),
                 "contact": contact,
+                "release": release,
+                "release_rising": release_rising,
+                "release_falling": release_falling,
                 "push_available": np.asarray(clip["push_available"], dtype=np.float32),
                 "hoop_pos": np.repeat(np.asarray(clip["hoop_pos_w"], dtype=np.float32)[None], len(root_pos), axis=0),
                 "link_lin_vel_w": finite_difference(fk["link_pos_w"], dt),
@@ -522,6 +565,8 @@ def preprocess_motion_batch(
         "link_lin_vel_w",
         "link_ang_vel_w",
         "push_available",
+        "release_rising",
+        "release_falling",
     }
     for field in processed[0]:
         cache[field] = _make_padded_tensor(
@@ -546,4 +591,7 @@ def load_motion_batch(
         )
     if "push_available" not in cache or cache["push_available"].shape != cache["valid"].shape:
         raise ValueError("Motion cache has no valid push_available field.")
+    for field in ("release", "release_rising", "release_falling"):
+        if field not in cache or cache[field].shape != cache["valid"].shape:
+            raise ValueError(f"Motion cache has no valid {field} field.")
     return cache

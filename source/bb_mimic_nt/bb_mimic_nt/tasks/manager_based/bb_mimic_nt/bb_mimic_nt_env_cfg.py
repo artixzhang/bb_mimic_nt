@@ -38,8 +38,8 @@ from . import mdp
 
 EXTENSION_ROOT = Path(__file__).resolve().parents[4]
 ASSET_ROOT = EXTENSION_ROOT / "assets"
-MOTION_SOURCE = ASSET_ROOT / "trajectory" / "shoot_batch_0922.pkl"
-MOTION_CACHE = ASSET_ROOT / "trajectory" / "shoot_batch_0922_processed.pt"
+MOTION_SOURCE = ASSET_ROOT / "trajectory" / "shoot_batch_0928.pkl"
+MOTION_CACHE = ASSET_ROOT / "trajectory" / "shoot_batch_0928_processed.pt"
 ROBOT_URDF = ASSET_ROOT / "robots" / "g1" / "urdf" / "g1_29dof_mode16_bb.urdf"
 
 
@@ -165,11 +165,11 @@ class ActionsCfg:
 
 @configclass
 class ObservationsCfg:
-    """The concatenated Teacher observation has exactly 479 scalars."""
+    """Teacher observations, including the explicit object-control phase."""
 
     @configclass
     class PolicyCfg(ObsGroup):
-        # Current state: 151.
+        # Current state: 175.
         gravity = ObsTerm(func=mdp.gravity_vec_b)
         root_height = ObsTerm(func=mdp.root_pos_z_w)
         root_quaternion = ObsTerm(func=mdp.root_quat_w)
@@ -184,7 +184,7 @@ class ObservationsCfg:
         previous_action = ObsTerm(func=mdp.previous_action)
         pd_error = ObsTerm(func=mdp.pd_error)
 
-        # Reference deltas, pose targets, velocities, and contacts: 137.
+        # Reference deltas, pose targets, velocities, contacts, and release: 186.
         root_position_error = ObsTerm(func=mdp.delta_root_pos_b)
         root_rotation_error = ObsTerm(func=mdp.delta_root_quat_b)
         joint_position_error = ObsTerm(func=mdp.delta_dof_pos)
@@ -198,6 +198,7 @@ class ObservationsCfg:
         reference_joint_velocity = ObsTerm(func=mdp.reference_dof_vel)
         reference_ball_linear_velocity = ObsTerm(func=mdp.reference_object_lin_vel_b)
         reference_contact = ObsTerm(func=mdp.reference_contact)
+        reference_release = ObsTerm(func=mdp.reference_release)
 
         gravity_history = ObsTerm(func=mdp.gravity_vec_b, history_length=TEACHER_HISTORY_LENGTH)
         joint_position_history = ObsTerm(func=mdp.dof_pos, history_length=TEACHER_HISTORY_LENGTH)
@@ -262,7 +263,7 @@ class EventsCfg:
 
 @configclass
 class G1ShootEnvCfg(ManagerBasedRLEnvCfg):
-    scene: G1ShootSceneCfg = G1ShootSceneCfg(num_envs=4096, env_spacing=5.0)
+    scene: G1ShootSceneCfg = G1ShootSceneCfg(num_envs=8192, env_spacing=7.0)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     commands: CommandsCfg = CommandsCfg()

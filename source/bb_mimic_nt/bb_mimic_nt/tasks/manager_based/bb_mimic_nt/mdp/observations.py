@@ -148,6 +148,11 @@ def reference_contact(env) -> torch.Tensor:
     return motion_command(env).reference["contact"]
 
 
+def reference_release(env) -> torch.Tensor:
+    """Reference release state: 0=held/controlled, 1=free/released."""
+    return motion_command(env).reference["release"].unsqueeze(-1)
+
+
 def phase(env) -> torch.Tensor:
     return motion_command(env).normalized_phase.unsqueeze(-1)
 

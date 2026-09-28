@@ -1,5 +1,9 @@
 # Changelog
 
+- 轨迹缓存增加独立二值 `release` 状态：0=持球、1=释放，上升沿为释放、下降沿为拿球；旧数据回退到“无双手 contact”。自由球阶段弱化 object reward 并关闭 hand-ball relative reward，新增按控制阶段与逐关节诊断日志。
+- 腾空高度约束由脚部单项改为脚部与 root 各 0.5 权重；root 短缺仅在参考双脚同时离地时触发，防止通过收腿代替整体起跳。
+- Teacher residual action 改为精确关节名到最大残差的映射，对髋/腰偏航和双臂分别限幅；Student DAgger、评估与导出同步继承该映射。
+
 - Teacher 的七项 DR 课程统一由线性插值改为 cubic smoothstep S 曲线，保持原起止区间且消除区间边界的强度斜率突变；Student 全强度 DR 不受影响。
 
 - DAgger replay 改为近期 FIFO 与历史 reservoir 分区存储，每个监督 batch 默认 75% 使用近期状态；默认 rollout 从 96 步缩短为 24 步并增加更新次数，减少 Student 闭环状态被旧数据稀释的问题。

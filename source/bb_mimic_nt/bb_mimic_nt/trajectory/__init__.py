@@ -13,7 +13,9 @@ from .processing import (
     cache_is_current,
     load_motion_batch,
     preprocess_motion_batch,
+    release_edges,
     reorder_clip_channels,
+    resolve_release_signal,
 )
 
 __all__ = [
@@ -26,5 +28,7 @@ __all__ = [
     "cache_is_current",
     "load_motion_batch",
     "preprocess_motion_batch",
+    "release_edges",
     "reorder_clip_channels",
+    "resolve_release_signal",
 ]

@@ -12,6 +12,7 @@ import torch
 
 from bb_mimic_nt.core import (
     advance_reference_frame,
+    apply_joint_residual_caps,
     apply_ballistic_speed_lock,
     clipped_regularization,
     downward_hoop_crossing,
@@ -39,6 +40,22 @@ def test_reference_residual_action_target_limits() -> None:
     assert torch.allclose(desired, torch.tensor([[0.4, 1.0, 1.8]]))
 
     assert rational_kernel(torch.tensor([0.0, 4.0]), 0.5).tolist() == pytest.approx([1.0, 1.0 / 3.0])
+
+
+def test_exact_joint_residual_caps_preserve_unspecified_joints() -> None:
+    scale = torch.tensor([[0.8, 0.8, 0.3]])
+    capped = apply_joint_residual_caps(
+        scale,
+        ("left_hip_yaw_joint", "left_knee_joint", "left_wrist_joint"),
+        {"left_hip_yaw_joint": 0.15, "left_wrist_joint": 0.20},
+        minimum_scale=0.10,
+    )
+    assert torch.equal(capped, torch.tensor([[0.15, 0.8, 0.2]]))
+    assert torch.equal(scale, torch.tensor([[0.8, 0.8, 0.3]]))
+    with pytest.raises(ValueError, match="unknown joints"):
+        apply_joint_residual_caps(scale, ("known", "second", "third"), {"missing": 0.2}, 0.1)
+    with pytest.raises(ValueError, match="at least minimum_residual_scale"):
+        apply_joint_residual_caps(scale, ("first", "second", "third"), {"first": 0.05}, 0.1)
 
 
 def test_joint_jerk_penalizes_velocity_reversal_after_two_samples() -> None:
@@ -137,8 +154,18 @@ def test_reward_normalization_gating_and_regularization_cap() -> None:
     post_hold = gated_top_level_reward(
         body, torch.zeros(3), torch.zeros(3), one, torch.zeros(3), (0.45, 0.25, 0.20, 0.10)
     )
+    separate_gates = gated_top_level_reward(
+        body,
+        torch.zeros(3),
+        torch.zeros(3),
+        one,
+        torch.full((3,), 0.2),
+        (0.45, 0.25, 0.20, 0.10),
+        relative_gate=torch.zeros(3),
+    )
     assert torch.equal(active, one)
     assert torch.equal(post_hold, one)
+    assert torch.allclose(separate_gates, torch.full((3,), 0.55 / 0.60))
 
     cost = clipped_regularization(
         (torch.full((1,), 100.0), torch.ones(1), torch.ones(1), torch.ones(1)),
@@ -163,6 +190,20 @@ def test_gated_height_shortfall_cost_is_one_sided_and_per_foot() -> None:
         gated_height_shortfall_cost(actual, reference[:, :1], contact, allowed_shortfall=0.0)
     with pytest.raises(ValueError, match="non-negative"):
         gated_height_shortfall_cost(actual, reference, contact, allowed_shortfall=-0.01)
+
+
+def test_root_height_shortfall_requires_both_reference_feet_airborne() -> None:
+    actual_root_height = torch.tensor([0.70, 0.70, 0.70])
+    reference_root_height = torch.tensor([0.90, 0.90, 0.90])
+    reference_foot_contact = torch.tensor([[1.0, 1.0], [1.0, 0.0], [0.0, 0.0]])
+    reference_root_support = torch.amax(reference_foot_contact, dim=-1)
+    cost = gated_height_shortfall_cost(
+        actual_root_height[:, None],
+        reference_root_height[:, None],
+        reference_root_support[:, None],
+        allowed_shortfall=0.02,
+    )
+    assert cost.tolist() == pytest.approx([0.0, 0.0, 0.18])
 
 
 def test_downward_hoop_crossing_rejects_reverse_and_offset() -> None:

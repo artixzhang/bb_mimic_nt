@@ -19,13 +19,7 @@ from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.math import quat_apply, quat_apply_inverse, quat_error_magnitude, quat_inv, quat_mul
 
-from bb_mimic_nt.core import (
-    advance_reference_frame,
-    downward_hoop_crossing,
-    interpolate_motion,
-    rsi_probability,
-    select_adaptive_speed,
-)
+from bb_mimic_nt.core import downward_hoop_crossing, interpolate_motion, rsi_probability, select_adaptive_speed
 from bb_mimic_nt.trajectory import (
     TRACKED_BODY_NAMES,
     cache_is_current,
@@ -116,12 +110,11 @@ class MotionReferenceCommand(CommandTerm):
         self.fps = float(metadata["fps"])
         if not 0 <= cfg.default_clip_id < self.num_clips:
             raise ValueError(f"default_clip_id must be between 0 and {self.num_clips - 1}.")
-        frame_index = torch.arange(self._batch["contact"].shape[1], device=self.device)[None]
-        valid_hand_contact = (
-            torch.any(self._batch["contact"][..., :2] > 0.5, dim=-1)
-            & (frame_index < self.lengths[:, None])
+        frame_index = torch.arange(self._batch["release"].shape[1], device=self.device)[None]
+        valid_release_event = (self._batch["release_rising"] > 0.5) & (
+            frame_index < self.lengths[:, None]
         )
-        self.release_frame = torch.where(valid_hand_contact, frame_index, -1).amax(dim=1).float()
+        self.last_release_event_frame = torch.where(valid_release_event, frame_index, -1).amax(dim=1).float()
         self.clip_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.fixed_clip_ids = torch.full_like(self.clip_ids, -1)
         self.frame = torch.zeros(self.num_envs, device=self.device)
@@ -172,12 +165,41 @@ class MotionReferenceCommand(CommandTerm):
                 for name in self.rotation_body_names
             }
         )
+        for name in self.dof_names:
+            self.metrics[f"error/joint/{name}/position_abs_rad"] = torch.zeros(
+                self.num_envs, device=self.device
+            )
+            self.metrics[f"control/joint/{name}/raw_action_abs"] = torch.zeros(
+                self.num_envs, device=self.device
+            )
+        self._phase_names = ("controlled", "free")
+        self._phase_metric_names = (
+            "root_rmse",
+            "dof_rmse",
+            "link_rmse",
+            "ball_rmse",
+            "error/relative_position_rmse_m",
+            "error/contact_mismatch_rate",
+            "control/raw_action_rms",
+            "control/pd_error_rmse_rad",
+        )
+        self._phase_durations = {
+            name: torch.zeros(self.num_envs, device=self.device) for name in self._phase_names
+        }
+        self._phase_metric_sums = {
+            f"phase/{phase}/{metric}": torch.zeros(self.num_envs, device=self.device)
+            for phase in self._phase_names
+            for metric in self._phase_metric_names
+        }
+        self._pickup_event_count = torch.zeros(self.num_envs, device=self.device)
+        self._release_event_count = torch.zeros(self.num_envs, device=self.device)
         self._time_averaged_metric_names = tuple(name for name in self.metrics if name != "shot_success")
         self.last_episode_metrics = {
             name: torch.zeros(self.num_envs, device=self.device) for name in self.metrics
         }
         self.last_episode_clip_ids = torch.full_like(self.clip_ids, -1)
         self._refresh_reference()
+        self._previous_object_control = self.object_control_active.clone()
         self._previous_reference_dof_pos = self.reference["dof_pos"].clone()
 
     @property
@@ -190,8 +212,21 @@ class MotionReferenceCommand(CommandTerm):
         return (self.frame / last).clamp(0.0, 1.0)
 
     @property
-    def object_reward_active(self) -> torch.Tensor:
+    def motion_reward_active(self) -> torch.Tensor:
         return self.stage < STAGE_POST_HOLD
+
+    @property
+    def object_control_active(self) -> torch.Tensor:
+        """Whether the reference annotation says the ball is robot-controlled."""
+        return self.reference["release"] < 0.5
+
+    @property
+    def object_pickup_event(self) -> torch.Tensor:
+        return self.reference["release_falling"] > 0.5
+
+    @property
+    def object_release_event(self) -> torch.Tensor:
+        return self.reference["release_rising"] > 0.5
 
     @property
     def motion_done(self) -> torch.Tensor:
@@ -237,6 +272,8 @@ class MotionReferenceCommand(CommandTerm):
         self.reference["contact"] = (self.reference["contact"] >= 0.5).float()
         frame_ids = torch.floor(self.frame).long().clamp_min(0)
         frame_ids = torch.minimum(frame_ids, self.lengths[self.clip_ids] - 1)
+        for name in ("release", "release_rising", "release_falling"):
+            self.reference[name] = self._batch[name][self.clip_ids, frame_ids]
         self.reference["push_available"] = self._batch["push_available"][self.clip_ids, frame_ids] > 0.5
         velocity_fields = (
             "root_lin_vel",
@@ -321,6 +358,27 @@ class MotionReferenceCommand(CommandTerm):
             for name, value in self.last_episode_metrics.items()
         }
         extras["clip_id_mean"] = self.last_episode_clip_ids[env_ids].float().mean().item()
+        extras["interaction/pickup_count"] = self._pickup_event_count[env_ids].mean().item()
+        extras["interaction/release_count"] = self._release_event_count[env_ids].mean().item()
+        self._pickup_event_count[env_ids] = 0.0
+        self._release_event_count[env_ids] = 0.0
+        for phase in self._phase_names:
+            phase_duration = self._phase_durations[phase][env_ids]
+            extras[f"phase/{phase}/fraction"] = (phase_duration / duration).mean().item()
+            present = phase_duration > 0.0
+            for metric in self._phase_metric_names:
+                key = f"phase/{phase}/{metric}"
+                conditional_mean = self._phase_metric_sums[key][env_ids] / phase_duration.clamp_min(
+                    self._env.step_dt
+                )
+                extras[key] = conditional_mean[present].mean().item() if torch.any(present) else 0.0
+                self._phase_metric_sums[key][env_ids] = 0.0
+            self._phase_durations[phase][env_ids] = 0.0
+        action_term = self._env.action_manager.get_term("joint_pos")
+        for index, name in enumerate(self.dof_names):
+            extras[f"control/joint/{name}/residual_scale_rad"] = (
+                action_term.residual_scale[env_ids, index].mean().item()
+            )
         for metric in self.metrics.values():
             metric[env_ids] = 0.0
 
@@ -350,10 +408,10 @@ class MotionReferenceCommand(CommandTerm):
         self.speed_update_elapsed[env_ids] = 0.0
         self.rsi_started[env_ids] = use_rsi
         self.shot_success[env_ids] = False
-        self.shot_eligible[env_ids] = (
-            self.frame[env_ids] <= self.release_frame[self.clip_ids[env_ids]]
-        )
+        last_release = self.last_release_event_frame[self.clip_ids[env_ids]]
+        self.shot_eligible[env_ids] = (last_release >= 0.0) & (self.frame[env_ids] <= last_release)
         self._refresh_reference()
+        self._previous_object_control[env_ids] = self.object_control_active[env_ids]
         arm_push(self._env, env_ids)
         self._previous_reference_dof_pos[env_ids] = self.reference["dof_pos"][env_ids]
         self._write_reference_state(env_ids)
@@ -456,6 +514,7 @@ class MotionReferenceCommand(CommandTerm):
         action_term = self._env.action_manager.get_term("joint_pos")
         raw_action = action_term.raw_actions
         effort_limit = self.robot.data.joint_effort_limits[:, self.joint_ids].clamp_min(1.0e-6)
+        joint_position_abs_error = torch.abs(joint_pos - self.reference["dof_pos"])
 
         instantaneous = {
             # Keep the original four names stable for the evaluator.
@@ -516,9 +575,29 @@ class MotionReferenceCommand(CommandTerm):
             "control/torque_limit_ratio_rms": torch.sqrt(
                 torch.mean((self.robot.data.applied_torque[:, self.joint_ids] / effort_limit) ** 2, dim=-1)
             ),
+            **{
+                f"error/joint/{name}/position_abs_rad": joint_position_abs_error[:, index]
+                for index, name in enumerate(self.dof_names)
+            },
+            **{
+                f"control/joint/{name}/raw_action_abs": torch.abs(raw_action[:, index])
+                for index, name in enumerate(self.dof_names)
+            },
         }
         for name, value in instantaneous.items():
             self.metrics[name] += value * dt
+        active = self.in_active_motion
+        controlled = active & self.object_control_active
+        phase_masks = {"controlled": controlled, "free": active & ~self.object_control_active}
+        for phase, mask in phase_masks.items():
+            weight = mask.float() * dt
+            self._phase_durations[phase] += weight
+            for metric in self._phase_metric_names:
+                self._phase_metric_sums[f"phase/{phase}/{metric}"] += instantaneous[metric] * weight
+        current_control = self.object_control_active
+        self._pickup_event_count += (active & current_control & ~self._previous_object_control).float()
+        self._release_event_count += (active & ~current_control & self._previous_object_control).float()
+        self._previous_object_control[:] = current_control
         self._previous_reference_dof_pos[:] = self.reference["dof_pos"]
 
     def _update_metrics(self) -> None:
@@ -564,17 +643,12 @@ class MotionReferenceCommand(CommandTerm):
                     self.speed[speed_update] = 1.0
                 self.speed_update_elapsed[speed_update] = 0.0
 
-            # advance_reference_frame locks speed to 1x at release, preserving
-            # the physical timing of the free basketball flight.
-            next_frame, next_speed = advance_reference_frame(
-                self.frame,
-                self.speed,
-                self.release_frame[self.clip_ids],
-                self.fps,
-                dt,
-            )
-            self.speed[active] = next_speed[active]
-            self.frame[active] = next_frame[active]
+            # Free-object phases always run at physical 1x time. A later pickup
+            # can resume adaptive timing, so repeated dribbles/passes do not
+            # rely on a single terminal release frame.
+            free_object = active & ~self.object_control_active
+            self.speed[free_object] = 1.0
+            self.frame[active] += self.speed[active] * self.fps * dt
             last = (self.lengths[self.clip_ids] - 1).float()
             reached = active & (self.frame >= last)
             self.frame[:] = torch.minimum(self.frame, last)

@@ -82,7 +82,7 @@ class StudentCurriculumCfg:
 
 @configclass
 class G1ShootStudentEnvCfg(G1ShootEnvCfg):
-    scene: StudentSceneCfg = StudentSceneCfg(num_envs=4096, env_spacing=5.0)
+    scene: StudentSceneCfg = StudentSceneCfg(num_envs=8192, env_spacing=7.0)
     observations: StudentObservationsCfg = StudentObservationsCfg()
     actions: StudentActionsCfg = StudentActionsCfg()
     rewards: StudentRewardsCfg = StudentRewardsCfg()
