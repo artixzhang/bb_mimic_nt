@@ -45,27 +45,70 @@ def root_velocity_reward(actual: torch.Tensor, reference: torch.Tensor, sigma: f
     return rational_kernel(torch.sum((actual - reference) ** 2, dim=-1), sigma)
 
 
-def joint_position_reward(actual: torch.Tensor, reference: torch.Tensor, sigma: float) -> torch.Tensor:
-    return gaussian((actual - reference) ** 2, sigma).mean(dim=-1)
+def joint_position_reward(
+    actual: torch.Tensor, 
+    reference: torch.Tensor, 
+    sigma: float, 
+    worst_weight: float = 0.0
+) -> torch.Tensor:
+    # 算全身 29 个关节的高斯跟踪分 (shape: [num_envs, 29])
+    scores = gaussian((actual - reference) ** 2, sigma)
+    mean_score = scores.mean(dim=-1)
+    worst_score = scores.amin(dim=-1)
+    # 混合返回: [全局 + 最差] 加权
+    return (1.0 - worst_weight) * mean_score + worst_weight * worst_score
 
 
 def joint_velocity_reward(actual: torch.Tensor, reference: torch.Tensor, sigma: float) -> torch.Tensor:
     return rational_kernel((actual - reference) ** 2, sigma).mean(dim=-1)
 
 
-def link_position_reward(actual: torch.Tensor, reference: torch.Tensor, sigma: float) -> torch.Tensor:
-    return gaussian(torch.sum((actual - reference) ** 2, dim=-1), sigma).mean(dim=-1)
+def _resolve_body_weights(
+    body_names: tuple[str, ...], 
+    overrides: dict[str, float] | None, 
+    device: torch.device
+) -> torch.Tensor | None:
+    if not overrides:
+        return None
+    weights = torch.ones(len(body_names), device=device)
+    for name, weight in overrides.items():
+        if name in body_names:
+            weights[body_names.index(name)] = weight
+    return weights
+
+
+def link_position_reward(
+    actual: torch.Tensor, 
+    reference: torch.Tensor, 
+    sigma: float, 
+    weights: torch.Tensor | None = None,
+    worst_weight: float = 0.0
+) -> torch.Tensor:
+    scores = gaussian(torch.sum((actual - reference) ** 2, dim=-1), sigma)
+    if weights is None:
+        mean_score = scores.mean(dim=-1)
+    else:
+        mean_score = torch.sum(scores * weights, dim=-1) / torch.sum(weights)
+    worst_score = scores.amin(dim=-1)
+    return (1.0 - worst_weight) * mean_score + worst_weight * worst_score
 
 
 def link_rotation_reward(
-    actual: torch.Tensor, reference: torch.Tensor, sigma: float, weights: torch.Tensor | None = None
+    actual: torch.Tensor, 
+    reference: torch.Tensor, 
+    sigma: float, 
+    weights: torch.Tensor | None = None,
+    worst_weight: float = 0.0
 ) -> torch.Tensor:
     shape = actual.shape
     error = quat_error_magnitude(actual.reshape(-1, 4), reference.reshape(-1, 4)).reshape(shape[:2])
     scores = gaussian(error**2, sigma)
     if weights is None:
-        return scores.mean(dim=-1)
-    return torch.sum(scores * weights, dim=-1) / torch.sum(weights)
+        mean_score = scores.mean(dim=-1)
+    else:
+        mean_score = torch.sum(scores * weights, dim=-1) / torch.sum(weights)
+    worst_score = scores.amin(dim=-1)
+    return (1.0 - worst_weight) * mean_score + worst_weight * worst_score
 
 
 def object_position_reward(actual: torch.Tensor, reference: torch.Tensor, sigma: float) -> torch.Tensor:
@@ -116,22 +159,40 @@ def contact_graph_reward(
 @configclass
 class UnifiedRewardCfg:
     # body, obj, relative, contact
-    global_weights: tuple[float, float, float, float] = (0.45, 0.30, 0.15, 0.15)
+    global_weights: tuple[float, float, float, float] = (0.45, 0.25, 0.25, 0.15)
     # root, joint, link, rotation_only
     body_weights: tuple[float, float, float, float] = (0.30, 0.30, 0.30, 0.10)
     # position, rotation, linear_velocity, angular_velocity
     root_weights: tuple[float, float, float, float] = (0.50, 0.30, 0.15, 0.05)
+    # position, velocity
     joint_weights: tuple[float, float] = (0.70, 0.30)
-    link_weights: tuple[float, float] = (0.70, 0.30)
+    # position, rotation
+    link_weights: tuple[float, float] = (0.50, 0.50)
 
     # position, direction, speed_magnitude, rotation
     object_weights: tuple[float, float, float, float] = (0.45, 0.35, 0.2, 0.0)
-    object_sigmas: tuple[float, float, float, float] = (20.0, 8.0, 2.0, 1.0)
+    object_sigmas: tuple[float, float, float, float] = (10.0, 5.0, 0.5, 1.0)
+
+    link_pos_body_weights: dict[str, float] = {
+        "left_hand": 2.0, 
+        "right_hand": 2.0, 
+        "left_ankle_roll_link": 2.0,
+        "right_ankle_roll_link": 2.0,
+    }
+    link_rot_body_weights: dict[str, float] = {
+        "left_hand": 2.0, 
+        "right_hand": 2.0,
+        "left_ankle_roll_link": 2.0,
+        "right_ankle_roll_link": 2.0,
+    }
 
     relative_weights: tuple[float, float] = (1.0, 0.0)
     root_sigmas: tuple[float, float, float, float] = (40.0, 10.0, 2.0, 0.5)
     joint_sigmas: tuple[float, float] = (4.0, 0.1)
+    joint_worst_weight: float = 0.30
     link_sigmas: tuple[float, float] = (40.0, 5.0)
+    link_pos_worst_weight: float = 0.30
+    link_rot_worst_weight: float = 0.30
     rotation_only_sigma: float = 5.0
     relative_sigmas: tuple[float, float] = (40.0, 1.0)
 
@@ -140,16 +201,16 @@ class UnifiedRewardCfg:
     foot_contact_sensitivity: float = 1.0
     hand_contact_force: float = 1.0
     foot_contact_force: float = 5.0
-    foot_airborne_height_tolerance: float = 0.05
+    foot_airborne_height_tolerance: float = 0.04
     foot_airborne_height_weight: float = 0.50
     
     action_magnitude_weight: float = 0.05
-    action_rate_weight: float = 0.3
+    action_rate_weight: float = 0.30
     target_residual_rate_weight: float = 0.05
     torque_weight: float = 1.0e-5
     limit_weight: float = 0.05
     joint_velocity_error_weight: float = 0.001
-    joint_jerk_weight: float = 1.0e-8
+    joint_jerk_weight: float = 1.0e-10
     regularization_clip: float = 0.5
     termination_penalty: float = 100.0
 
@@ -291,7 +352,10 @@ class UnifiedMimicReward(ManagerTermBase):
 
         joint_parts = {
             "mimic/body/joint/position": joint_position_reward(
-                robot.data.joint_pos[:, term.joint_ids], reference["dof_pos"], settings.joint_sigmas[0]
+                robot.data.joint_pos[:, term.joint_ids],
+                reference["dof_pos"],
+                settings.joint_sigmas[0],
+                settings.joint_worst_weight
             ),
             "mimic/body/joint/velocity": joint_velocity_reward(
                 robot.data.joint_vel[:, term.joint_ids], reference["dof_vel"], settings.joint_sigmas[1]
@@ -305,14 +369,27 @@ class UnifiedMimicReward(ManagerTermBase):
         actual_link_quat = quat_mul(
             quat_inv(root_quat.reshape(-1, 4)), body_quat.reshape(-1, 4)
         ).reshape_as(body_quat)
+
+        link_pos_weights = _resolve_body_weights(term.tracked_body_names, settings.link_pos_body_weights, self.device)
+        link_rot_weights = _resolve_body_weights(term.tracked_body_names, settings.link_rot_body_weights, self.device)
+
         link_parts = {
             "mimic/body/link/position": link_position_reward(
-                actual_link_pos, reference["link_pos_b"], settings.link_sigmas[0]
+                actual_link_pos,
+                reference["link_pos_b"],
+                settings.link_sigmas[0],
+                weights=link_pos_weights,
+                worst_weight=settings.link_pos_worst_weight,
             ),
             "mimic/body/link/rotation": link_rotation_reward(
-                actual_link_quat, reference["link_quat_b"], settings.link_sigmas[1]
+                actual_link_quat,
+                reference["link_quat_b"],
+                settings.link_sigmas[1],
+                weights=link_rot_weights,
+                worst_weight=settings.link_rot_worst_weight,
             ),
         }
+        
         link = normalized_weighted_sum(tuple(link_parts.values()), settings.link_weights)
         rotation_body_quat = robot.data.body_quat_w[:, term.rotation_body_ids]
         rotation_root_quat = robot.data.root_link_quat_w[:, None].expand_as(rotation_body_quat)

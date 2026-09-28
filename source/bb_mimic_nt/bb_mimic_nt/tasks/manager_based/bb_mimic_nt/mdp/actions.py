@@ -89,6 +89,18 @@ class ReferenceResidualJointPositionAction(ActionTerm):
             min=cfg.minimum_residual_scale,
             max=cfg.maximum_residual_scale,
         )
+
+        if cfg.arm_maximum_residual_scale is not None and cfg.arm_joint_keywords:
+            arm_mask = torch.tensor(
+                [any(k in name for k in cfg.arm_joint_keywords) for name in self._joint_names],
+                dtype=torch.bool,
+                device=self.device,
+            )
+            self._residual_scale[:, arm_mask] = self._residual_scale[:, arm_mask].clamp(
+                min=cfg.minimum_residual_scale,
+                max=cfg.arm_maximum_residual_scale
+            )
+
         self._dr_context = get_dr_context(env)
         self.synchronize_reference()
 
@@ -184,7 +196,9 @@ class ReferenceResidualJointPositionActionCfg(ActionTermCfg):
     residual_scale_fraction: float = 0.50
     minimum_residual_scale: float = 0.10
     maximum_residual_scale: float = 0.80
-    position_limit_margin: float = 0.020
+    position_limit_margin: float = 0.050
+    arm_maximum_residual_scale: float | None = 0.30
+    arm_joint_keywords: tuple[str, ...] = ("shoulder", "elbow", "wrist")
 
 
 class StudentNominalJointPositionAction(ActionTerm):
