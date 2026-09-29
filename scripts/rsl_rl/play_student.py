@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Interactively play an exported Student with fixed two-step observation/action delay."""
+"""Interactively play an exported Student with fixed delays from its configuration."""
 
 from __future__ import annotations
 

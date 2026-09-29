@@ -55,8 +55,8 @@ class DomainRandomizationContext:
         cfg = env.cfg.dr
         if cfg.total_iterations < 1 or cfg.steps_per_iteration < 1:
             raise ValueError("DR training iterations and steps per iteration must be positive.")
-        if cfg.delay_max_offset_steps < 1 or cfg.delay_nominal_steps < cfg.delay_max_offset_steps:
-            raise ValueError("DR delay nominal and maximum offset must define non-negative steps.")
+        if cfg.delay_max_offset_steps < 0 or cfg.delay_nominal_steps < 0:
+            raise ValueError("DR delay nominal and maximum offset must be non-negative.")
         if len(cfg.push_force_min_n) != 3 or len(cfg.push_force_max_n) != 3:
             raise ValueError("DR push force ranges must contain x, y, and z limits.")
         if min(
@@ -141,7 +141,7 @@ class DomainRandomizationContext:
         cfg = self.cfg
         return torch.stack(
             (
-                (self.delay_steps.float() - cfg.delay_nominal_steps) / cfg.delay_max_offset_steps,
+                (self.delay_steps.float() - cfg.delay_nominal_steps) / max(cfg.delay_max_offset_steps, 1),
                 (self.ball_mass_scale - 1.0) / cfg.ball_mass_fraction,
                 (self.pd_scale - 1.0) / cfg.pd_gain_fraction,
                 (self.hand_friction - cfg.hand_friction_nominal) / cfg.hand_friction_delta,
@@ -242,8 +242,10 @@ def reset_domain_randomization(env, env_ids: torch.Tensor):
     count = len(env_ids)
     device = env.device
     delay_radius = math.floor(cfg.delay_max_offset_steps * strength["delay"] + 1.0e-6)
-    context.delay_steps[env_ids] = cfg.delay_nominal_steps + torch.randint(
-        -delay_radius, delay_radius + 1, (count,), device=device
+    delay_low = max(0, cfg.delay_nominal_steps - delay_radius)
+    delay_high = cfg.delay_nominal_steps + delay_radius
+    context.delay_steps[env_ids] = torch.randint(
+        delay_low, delay_high + 1, (count,), device=device
     )
     context.ball_mass_scale[env_ids] = _uniform_scale(count, cfg.ball_mass_fraction, strength["ball_mass"], device)
     context.pd_scale[env_ids] = _uniform_scale(count, cfg.pd_gain_fraction, strength["pd_gains"], device)

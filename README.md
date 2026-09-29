@@ -7,7 +7,7 @@
 - 训练环境：`BbMimicNT-G1-Shoot-v0`
 - 确定性播放环境：`BbMimicNT-G1-Shoot-Play-v0`
 - 仿真 / 策略频率：200 Hz / 100 Hz（decimation 2）
-- 动作：29 维 reference-relative PD residual；Gaussian policy 输出经 `tanh` 约束，最终 PD 目标限制在机械关节限位内，再按每环境 0–4 个策略步延迟执行
+- 动作：29 维 reference-relative PD residual；Gaussian policy 输出经 `tanh` 约束，最终 PD 目标限制在机械关节限位内，再按每环境 0–2 个策略步延迟执行
 - Teacher observation：固定 674 维，包含当前状态、reference pose/velocity/contact、object-control state、历史、phase、reference speed 和 6 维 DR 特权参数
 - 原始轨迹：`source/bb_mimic_nt/assets/trajectory/shoot_batch_0928.pkl`
 - 预处理缓存：同目录 `shoot_batch_0928_processed.pt`（自动生成并被 Git 忽略）
@@ -61,7 +61,7 @@ python scripts/rsl_rl/train.py \
 
 | 项目 | 标称值 | 完整采样范围 |
 | --- | ---: | ---: |
-| 最终 PD 目标执行延迟 | 2 个 100 Hz 步 | 0–4 步，观测为 `(steps-2)/2` |
+| 最终 PD 目标执行延迟 | 0 个 100 Hz 步 | 0–2 步，观测为 `steps/2` |
 | 篮球质量 | USD 默认质量 | 默认值 ±5% |
 | 29 个关节的 PD 刚度 | 机器人默认值 | `Kp` 比例 ±10%，`Kd` 比例为其平方根 |
 | 双手静、动摩擦 | 0.8 | 0.6–1.0 |
@@ -69,7 +69,9 @@ python scripts/rsl_rl/train.py \
 | 骨盆及八个髋/膝 link 质量 | 各 link 默认质量 | 共用比例 ±10%，惯量同比例变化 |
 | `torso_link` 外力和力矩 | 0 | 世界坐标 X/Y 各 ±200 N、Z ±50 N，力矩各轴 ±3 Nm；最长 200 ms |
 
-外力每次 rollout 最多触发一次，起点从当前 RSI 帧之后的 `push_available=1` 参考帧均匀选取。标记变为 0 时立即停止脉冲。播放和评估关闭随机化及外力，保留固定 2 步执行延迟。
+延迟由 `env_cfg.dr.delay_nominal_steps`（默认 0）和 `delay_max_offset_steps`（默认 2）控制。课程半径为 `floor(delay_max_offset_steps * strength)`，reset 时在 `[max(0, nominal-radius), nominal+radius]` 内均匀采样整数步，负下界先截为 0；不会先采样负数再将样本裁成 0。延迟课程在训练进度 30%–70% 扩大范围：固定 0 → 0–1 → 0–2 步。标称值是课程起点和播放值，完整均匀分布的中位数为 1 步。要改为标称 1、采样 0–2 步，设为 `1, 1`；固定零延迟设为 `0, 0`。延迟特权观测通式为 `(steps-nominal)/max(offset, 1)`。
+
+外力每次 rollout 最多触发一次，起点从当前 RSI 帧之后的 `push_available=1` 参考帧均匀选取。标记变为 0 时立即停止脉冲。播放和评估关闭随机化及外力，使用固定标称值，默认 0 步执行延迟。
 
 TensorBoard 除 reward/termination 外，还记录 `Metrics/motion/error/*` 的原始 reference tracking error，以及 `Metrics/motion/control/*` 的 action 变化、PD target 变化、action 饱和率、关节速度和力矩占比。`Metrics/motion/phase/{controlled,free}/*` 按 `release` 分段汇总，`error/joint/*` 与 `control/joint/*` 提供逐关节误差和动作幅度。这些指标带有物理单位，适合排查 reward 上升但动作抖动的问题。
 
@@ -129,7 +131,7 @@ PYTHONPATH=source/bb_mimic_nt pytest -q tests
 
 Student 训练和播放任务分别为 `BbMimicNT-G1-Shoot-Student-DAgger-v0` 与 `BbMimicNT-G1-Shoot-Student-Play-v0`。Teacher 保持原始 479 维无噪声、无观测延迟输入；Student 使用固定 283 维显式缩放输入：phase、三帧重力投影、pelvis 角速度、nominal-relative 关节位置、关节速度、实际执行动作，以及 reset 时固定的 hoop–pelvis 相对位置。机器人传感量训练时加入可调高斯噪声与每回合采样一次的 0–4 步延迟，推理固定为 2 步。
 
-Student 输出 29 维 nominal-relative 关节位置（rad），直接形成 PD target，不经过滤波。它与 Teacher 共用 PD 参数、0–4 步动作执行延迟以及全部动力学/外力 DR；Student 训练从第一个 iteration 起使用完整 DR 范围，reference 始终以 1× 推进。DAgger 在前 20% 完全由 Teacher 执行，20%–50% 通过 smoothstep 概率逐环境混合，从 50% 起完全由 Student 执行；所有访问状态始终由冻结 Teacher 标注。
+Student 输出 29 维 nominal-relative 关节位置（rad），直接形成 PD target，不经过滤波。它与 Teacher 共用 PD 参数、动作执行延迟以及全部动力学/外力 DR；动作延迟参数从 Teacher checkpoint 对应的环境配置读取，新默认为标称 0、采样 0–2 步，已有 checkpoint 保留原配置。Student 观测延迟仍为训练 0–4 步、推理 2 步。Student 训练从第一个 iteration 起使用完整 DR 范围，reference 始终以 1× 推进。DAgger 在前 20% 完全由 Teacher 执行，20%–50% 通过 smoothstep 概率逐环境混合，从 50% 起完全由 Student 执行；所有访问状态始终由冻结 Teacher 标注。
 
 ```bash
 python scripts/rsl_rl/train_dagger.py \
@@ -160,4 +162,4 @@ python scripts/rsl_rl/export_student.py \
   --output outputs/student_export
 ```
 
-交互播放支持 `V` reference 点、`,` / `.` 切换 clip、`P` 或空格暂停/恢复、`R` 重启、`--all-clips`、`--ignore-failures` 和 `--no-timeout`。导出目录包含 `student_weights.pt`、TorchScript、ONNX 与 `student_config.json`；配置记录观测顺序/缩放、关节顺序、nominal pose、安全限位、PD 参数和固定中值延迟。成对评估对相同 clip 分别运行 Teacher 与 Student，输出篮球首次触地相对篮筐的水平落点和最高高度。
+交互播放支持 `V` reference 点、`,` / `.` 切换 clip、`P` 或空格暂停/恢复、`R` 重启、`--all-clips`、`--ignore-failures` 和 `--no-timeout`。导出目录包含 `student_weights.pt`、TorchScript、ONNX 与 `student_config.json`；配置记录观测顺序/缩放、关节顺序、nominal pose、安全限位、PD 参数和固定标称延迟。成对评估对相同 clip 分别运行 Teacher 与 Student，输出篮球首次触地相对篮筐的水平落点和最高高度。

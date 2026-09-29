@@ -70,14 +70,26 @@ def test_delay_selector_uses_latest_final_target_and_per_env_levels() -> None:
     assert torch.equal(result[1], history[2, 1])
 
 
-def test_reset_only_changes_selected_context_rows(monkeypatch) -> None:
+def test_zero_delay_with_single_history_slot_uses_current_target() -> None:
+    select = _delay_selector()
+    history = torch.arange(6, dtype=torch.float32).reshape(1, 2, 3)
+    assert torch.equal(select(history, 0, torch.zeros(2, dtype=torch.long)), history[0])
+
+
+@pytest.mark.parametrize("nominal, offset", [(2, 2), (1, 1), (0, 0), (1, 0), (0, 2)])
+@pytest.mark.parametrize("iteration, strength", [(0, 0.0), (40, 0.5), (100, 1.0)])
+def test_reset_only_changes_selected_context_rows(monkeypatch, nominal, offset, iteration, strength) -> None:
     schedule_names = ("delay", "ball_mass", "pd_gains", "hand_friction", "foot_friction", "link_mass", "push")
     schedules = {name: SimpleNamespace(enabled=True, start_fraction=0.2, end_fraction=0.6) for name in schedule_names}
+    for name in schedule_names:
+        schedules[name].full_strength = name != "delay"
     cfg = SimpleNamespace(total_iterations=100, steps_per_iteration=10, **_ranges(), **schedules)
-    env = SimpleNamespace(device="cpu", common_step_counter=1000, cfg=SimpleNamespace(dr=cfg))
+    cfg.delay_nominal_steps = nominal
+    cfg.delay_max_offset_steps = offset
+    env = SimpleNamespace(device="cpu", common_step_counter=iteration * 10, cfg=SimpleNamespace(dr=cfg))
     context = SimpleNamespace(
         iteration_offset=0,
-        delay_steps=torch.full((3,), 2, dtype=torch.long),
+        delay_steps=torch.full((3,), nominal, dtype=torch.long),
         ball_mass_scale=torch.ones(3),
         pd_scale=torch.ones(3),
         hand_friction=torch.full((3,), 0.8),
@@ -101,9 +113,17 @@ def test_reset_only_changes_selected_context_rows(monkeypatch) -> None:
     monkeypatch.setattr(events, "_set_masses_and_inertias", lambda *args: None)
     monkeypatch.setattr(events, "_set_pd_gains", lambda *args: None)
     monkeypatch.setattr(events, "_set_friction", lambda *args: None)
+    randint = torch.randint
+    sampled_bounds = []
+
+    def record_randint(low, high, size, **kwargs):
+        sampled_bounds.append((low, high))
+        return randint(low, high, size, **kwargs)
+
+    monkeypatch.setattr(torch, "randint", record_randint)
     torch.manual_seed(7)
     events.reset_domain_randomization(env, torch.tensor([0, 2]))
-    assert context.delay_steps[1] == 2
+    assert context.delay_steps[1] == nominal
     assert context.ball_mass_scale[1] == 1.0
     assert context.pd_scale[1] == 1.0
     assert context.hand_friction[1] == pytest.approx(0.8)
@@ -112,7 +132,12 @@ def test_reset_only_changes_selected_context_rows(monkeypatch) -> None:
     assert context.push_force[1].count_nonzero() == 0
     assert torch.equal(context.push_applied, torch.tensor([False, True, False]))
     assert context.robot.has_external_wrench
-    assert torch.all((context.delay_steps[[0, 2]] >= 0) & (context.delay_steps[[0, 2]] <= 4))
+    radius = int(offset * strength)
+    assert sampled_bounds == [(max(0, nominal - radius), nominal + radius + 1)]
+    assert torch.all(
+        (context.delay_steps[[0, 2]] >= max(0, nominal - radius))
+        & (context.delay_steps[[0, 2]] <= nominal + radius)
+    )
     assert torch.all((context.ball_mass_scale[[0, 2]] >= 0.95) & (context.ball_mass_scale[[0, 2]] <= 1.05))
     assert torch.all(context.push_force[[0, 2], 0].abs() <= context.push_force_max)
     assert torch.all(context.push_force[[0, 2], 0].abs() >= context.push_force_min)
@@ -129,16 +154,24 @@ def test_push_force_range_is_scaled_by_curriculum_strength() -> None:
     assert torch.all(force.max(dim=0).values > 0.0)
 
 
-def test_privileged_observation_order_and_nominal_values() -> None:
+@pytest.mark.parametrize("nominal, offset", [(2, 2), (1, 1), (0, 0), (1, 0), (0, 2)])
+def test_privileged_observation_order_and_nominal_values(nominal, offset) -> None:
     context = object.__new__(events.DomainRandomizationContext)
     context.cfg = SimpleNamespace(**_ranges())
-    context.delay_steps = torch.tensor([0, 2, 4])
+    context.cfg.delay_nominal_steps = nominal
+    context.cfg.delay_max_offset_steps = offset
+    context.delay_steps = torch.tensor([max(0, nominal - offset), nominal, nominal + offset])
     context.ball_mass_scale = torch.tensor([0.95, 1.0, 1.05])
     context.pd_scale = torch.tensor([0.9, 1.0, 1.1])
     context.hand_friction = torch.tensor([0.6, 0.8, 1.0])
     context.foot_friction = torch.tensor([0.6, 0.9, 1.2])
     context.link_mass_scale = torch.tensor([0.9, 1.0, 1.1])
-    assert torch.allclose(context.privileged, torch.tensor([[-1.0] * 6, [0.0] * 6, [1.0] * 6]), atol=1e-6)
+    expected = torch.tensor([[-1.0] * 6, [0.0] * 6, [1.0] * 6])
+    expected[0, 0] = -min(nominal, offset) / max(offset, 1)
+    if offset == 0:
+        expected[:, 0] = 0.0
+    assert torch.isfinite(context.privileged).all()
+    assert torch.allclose(context.privileged, expected, atol=1e-6)
 
 
 def test_mass_cache_reuses_physx_data_and_scales_selected_rows() -> None:

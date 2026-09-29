@@ -204,9 +204,9 @@ class UnifiedRewardCfg:
     hand_contact_force: float = 1.0
     foot_contact_force: float = 5.0
     foot_airborne_height_tolerance: float = 0.0
-    foot_airborne_height_weight: float = 0.2
+    foot_airborne_height_weight: float = 0.0
     root_airborne_height_tolerance: float = 0.0
-    root_airborne_height_weight: float = 1.0
+    root_airborne_height_weight: float = 1.2
     
     action_magnitude_weight: float = 0.05
     action_rate_weight: float = 0.20

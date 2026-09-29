@@ -75,7 +75,9 @@ class DRDisabledCfg:
 class DomainRandomizationCfg:
     total_iterations: int = PPO_MAX_ITERATIONS
     steps_per_iteration: int = PPO_STEPS_PER_ENV
-    delay_nominal_steps: int = 2
+    # Policy steps: fixed nominal at play; train uniformly over
+    # max(0, nominal - radius)..nominal + radius as the curriculum expands.
+    delay_nominal_steps: int = 0
     delay_max_offset_steps: int = 2
     ball_mass_fraction: float = 0.05
     pd_gain_fraction: float = 0.10
@@ -287,6 +289,11 @@ class G1ShootEnvCfg(ManagerBasedRLEnvCfg):
         # Isaac Sim exposes CCD at scene level; this protects the fast ball.
         self.sim.physx.enable_ccd = True
         self.sim.physx.bounce_threshold_velocity = 0.2
+        # Leave headroom for contact peaks during synchronized resets and
+        # Student take-over with 8192 environments. These fixed buffers do not
+        # automatically grow when more device memory is available.
+        self.sim.physx.gpu_max_rigid_patch_count = 2**19
+        self.sim.physx.gpu_collision_stack_size = 2**29
 
 
 @configclass
