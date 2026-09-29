@@ -11,7 +11,7 @@ from isaaclab_rl.rsl_rl import (
 @configclass
 class G1ShootStudentDAggerCfg(RslRlDistillationRunnerCfg):
     num_steps_per_env: int = 24
-    max_iterations: int = 500
+    max_iterations: int = 1000
     save_interval: int = 50
     experiment_name: str = "g1_shoot_student_dagger_v1"
     obs_groups: dict[str, list[str]] = {"policy": ["policy"], "teacher": ["teacher"]}
@@ -31,10 +31,11 @@ class G1ShootStudentDAggerCfg(RslRlDistillationRunnerCfg):
         max_grad_norm=1.0,
         loss_type="mse",
     )
-    replay_capacity: int = 262_144
+    # Recent half holds 32 steps at 8192 envs, including the full 24-step rollout.
+    replay_capacity: int = 524_288
     replay_recent_storage_fraction: float = 0.5
     replay_recent_sample_fraction: float = 0.75
     updates_per_iteration: int = 32
     batch_size: int = 8192
-    student_execution_start_fraction: float = 0.20
-    student_execution_end_fraction: float = 0.50
+    student_execution_start_fraction: float = 0.10
+    student_execution_end_fraction: float = 0.30

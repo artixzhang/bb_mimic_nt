@@ -8,9 +8,43 @@ from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
 
 from bb_mimic_nt.robots.unitree_g1_bb import G1Constants
+from bb_mimic_nt.student import STUDENT_HISTORY_LENGTH
 
 from . import mdp
-from .bb_mimic_nt_env_cfg import G1ShootEnvCfg, G1ShootSceneCfg, ObservationsCfg
+from .bb_mimic_nt_env_cfg import (
+    DomainRandomizationCfg, DRPhysicsScheduleCfg, G1ShootEnvCfg, G1ShootSceneCfg, ObservationsCfg,
+)
+
+
+@configclass
+class StudentPhysicsScheduleCfg(DRPhysicsScheduleCfg):
+    start_fraction: float = 0.05
+    end_fraction: float = 0.25
+
+
+@configclass
+class StudentLatencyScheduleCfg(DRPhysicsScheduleCfg):
+    start_fraction: float = 0.10
+    end_fraction: float = 0.30
+
+
+@configclass
+class StudentPushScheduleCfg(DRPhysicsScheduleCfg):
+    start_fraction: float = 0.10
+    end_fraction: float = 0.35
+
+
+@configclass
+class StudentDomainRandomizationCfg(DomainRandomizationCfg):
+    """Student-owned timing; physical ranges come from the selected Teacher."""
+
+    delay: StudentLatencyScheduleCfg = StudentLatencyScheduleCfg()
+    ball_mass: StudentPhysicsScheduleCfg = StudentPhysicsScheduleCfg()
+    pd_gains: StudentPhysicsScheduleCfg = StudentPhysicsScheduleCfg()
+    hand_friction: StudentPhysicsScheduleCfg = StudentPhysicsScheduleCfg()
+    foot_friction: StudentPhysicsScheduleCfg = StudentPhysicsScheduleCfg()
+    link_mass: StudentPhysicsScheduleCfg = StudentPhysicsScheduleCfg()
+    push: StudentPushScheduleCfg = StudentPushScheduleCfg()
 
 
 @configclass
@@ -26,8 +60,15 @@ class StudentObservationScalesCfg:
 
 @configclass
 class StudentObservationSettingsCfg:
-    delay_nominal_steps: int = 2
-    delay_max_offset_steps: int = 2
+    history_length: int = STUDENT_HISTORY_LENGTH
+    delay_nominal_steps: int = 1
+    delay_min_steps: int = 0
+    delay_max_steps: int = 3
+    # Ramp sensor noise and delay spread before Student takes full control.
+    enabled: bool = True
+    start_fraction: float = 0.0
+    end_fraction: float = 0.20
+    full_strength: bool = False
     randomize_delay: bool = True
     enable_noise: bool = True
     noise_strength: float = 1.0
@@ -88,13 +129,12 @@ class G1ShootStudentEnvCfg(G1ShootEnvCfg):
     rewards: StudentRewardsCfg = StudentRewardsCfg()
     curriculum: StudentCurriculumCfg = StudentCurriculumCfg()
     student_observation: StudentObservationSettingsCfg = StudentObservationSettingsCfg()
+    dr: StudentDomainRandomizationCfg = StudentDomainRandomizationCfg()
 
     def __post_init__(self) -> None:
         super().__post_init__()
         self.commands.motion.enable_rsi = False
         self.commands.motion.enable_adaptive_speed = False
-        for name in ("delay", "ball_mass", "pd_gains", "hand_friction", "foot_friction", "link_mass", "push"):
-            getattr(self.dr, name).full_strength = True
 
 
 @configclass

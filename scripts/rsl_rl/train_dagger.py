@@ -47,6 +47,7 @@ from bb_mimic_nt.student_runtime import (
     student_export,
     student_load_teacher,
     student_metadata,
+    student_validate_resume_observation,
 )
 
 
@@ -118,6 +119,7 @@ def main(env_cfg, agent_cfg):
         motion = base.command_manager.get_term("motion")
         replay = StudentReplay(
             agent_cfg.replay_capacity,
+            observation_dim=observations["policy"].shape[-1],
             device=base.device,
             recent_storage_fraction=agent_cfg.replay_recent_storage_fraction,
             recent_sample_fraction=agent_cfg.replay_recent_sample_fraction,
@@ -134,6 +136,7 @@ def main(env_cfg, agent_cfg):
                 raise ValueError("Resume checkpoint is not a compatible Student DAgger checkpoint.")
             if state["teacher_sha256"] != metadata["teacher_sha256"]:
                 raise ValueError("Resume checkpoint was trained against a different Teacher.")
+            student_validate_resume_observation(state["metadata"], metadata)
             model.student.load_state_dict(state["student"])
             optimizer.load_state_dict(state["optimizer"])
             if state.get("replay") is not None:
@@ -143,6 +146,9 @@ def main(env_cfg, agent_cfg):
             base.reset()
             observations = env.get_observations()
 
+        episode_steps = torch.zeros(base.num_envs, device=base.device)
+        previous_student = previous_label = None
+        previous_done = torch.ones(base.num_envs, dtype=torch.bool, device=base.device)
         for iteration in range(start_iteration, agent_cfg.max_iterations):
             student_probability = student_execution_probability(
                 iteration,
@@ -150,8 +156,15 @@ def main(env_cfg, agent_cfg):
                 agent_cfg.student_execution_start_fraction,
                 agent_cfg.student_execution_end_fraction,
             )
-            student_count = 0
-            target_error = 0.0
+            student_count = torch.zeros((), device=base.device)
+            target_error = torch.zeros(action_term.action_dim, device=base.device)
+            delta_error = torch.zeros((), device=base.device)
+            student_delta_sq = torch.zeros((), device=base.device)
+            teacher_delta_sq = torch.zeros((), device=base.device)
+            delta_count = torch.zeros((), device=base.device)
+            completed_count = torch.zeros((), device=base.device)
+            failure_count = torch.zeros((), device=base.device)
+            completed_steps = torch.zeros((), device=base.device)
             for _ in range(agent_cfg.num_steps_per_env):
                 with torch.no_grad():
                     student_action = model.act_inference(observations)
@@ -165,11 +178,27 @@ def main(env_cfg, agent_cfg):
                         action_term.nominal,
                     )
                     executed, student_mask = student_mix_actions(label, student_action, student_probability)
-                    target_error += functional.l1_loss(student_action, label).item()
-                student_count += int(student_mask.sum().item())
+                    target_error += (student_action - label).abs().mean(dim=0)
+                    if previous_student is not None:
+                        valid = ~previous_done
+                        student_delta = student_action - previous_student
+                        teacher_delta = label - previous_label
+                        delta_error += ((student_delta - teacher_delta).abs().mean(dim=-1) * valid).sum()
+                        student_delta_sq += (student_delta.square().mean(dim=-1) * valid).sum()
+                        teacher_delta_sq += (teacher_delta.square().mean(dim=-1) * valid).sum()
+                        delta_count += valid.sum()
+                    previous_student, previous_label = student_action, label
+                student_count += student_mask.sum()
                 replay.add(observations["policy"], label)
                 action_term.set_teacher_residual(teacher_raw, ~student_mask)
-                observations, _, _, _ = env.step(executed)
+                observations, _, done, info = env.step(executed)
+                previous_done = done.bool()
+                episode_steps += 1
+                completed_count += previous_done.sum()
+                time_outs = info.get("time_outs", torch.zeros_like(previous_done)).bool()
+                failure_count += (previous_done & ~time_outs).sum()
+                completed_steps += (episode_steps * previous_done).sum()
+                episode_steps[previous_done] = 0
 
             model.student.train()
             losses = []
@@ -188,12 +217,23 @@ def main(env_cfg, agent_cfg):
             with torch.no_grad():
                 recent_inputs, recent_targets = replay.sample_recent(agent_cfg.batch_size)
                 recent_loss = functional.mse_loss(model.student(recent_inputs), recent_targets).item()
-            execution_rate = student_count / (agent_cfg.num_steps_per_env * base.num_envs)
+            execution_rate = (student_count / (agent_cfg.num_steps_per_env * base.num_envs)).item()
             writer.add_scalar("DAgger/behavior_mse", mean_loss, iteration)
             writer.add_scalar("DAgger/recent_behavior_mse", recent_loss, iteration)
             writer.add_scalar("DAgger/student_probability", student_probability, iteration)
             writer.add_scalar("DAgger/student_execution_rate", execution_rate, iteration)
-            writer.add_scalar("DAgger/student_teacher_action_mae", target_error / agent_cfg.num_steps_per_env, iteration)
+            joint_mae = target_error / agent_cfg.num_steps_per_env
+            writer.add_scalar("DAgger/student_teacher_action_mae", joint_mae.mean(), iteration)
+            for name, error in zip(motion.dof_names, joint_mae):
+                writer.add_scalar(f"DAgger/joint_action_mae/{name}", error, iteration)
+            writer.add_scalar("DAgger/action_delta_mae_rad", delta_error / delta_count.clamp_min(1), iteration)
+            writer.add_scalar("DAgger/student_action_delta_rms_rad", (student_delta_sq / delta_count.clamp_min(1)).sqrt(), iteration)
+            writer.add_scalar("DAgger/teacher_action_delta_rms_rad", (teacher_delta_sq / delta_count.clamp_min(1)).sqrt(), iteration)
+            writer.add_scalar("DAgger/completed_episodes", completed_count, iteration)
+            if completed_count.item() > 0:
+                writer.add_scalar("DAgger/failure_fraction", failure_count / completed_count, iteration)
+                writer.add_scalar("DAgger/mean_episode_steps", completed_steps / completed_count, iteration)
+            writer.add_scalar("DAgger/sensor_curriculum_strength", base.student_observation.curriculum_strength, iteration)
             writer.add_scalar("DAgger/replay_size", replay.size, iteration)
             writer.add_scalar("DAgger/replay_recent_size", replay.recent_size, iteration)
             writer.add_scalar("DAgger/replay_history_size", replay.history_size, iteration)
@@ -217,7 +257,9 @@ def main(env_cfg, agent_cfg):
                 }
                 torch.save(payload, run / f"model_{iteration + 1}.pt")
 
-        policy = StudentPolicy(agent_cfg.policy.student_hidden_dims, agent_cfg.policy.activation).to(base.device)
+        policy = StudentPolicy(
+            agent_cfg.policy.student_hidden_dims, agent_cfg.policy.activation, metadata["observation_dim"]
+        ).to(base.device)
         policy.student.load_state_dict(model.student.state_dict())
         student_export(policy.eval(), run / "exported", metadata)
         print(f"Student artifacts: {run / 'exported'}")

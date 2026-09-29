@@ -129,9 +129,21 @@ PYTHONPATH=source/bb_mimic_nt pytest -q tests
 
 ## Student DAgger
 
-Student 训练和播放任务分别为 `BbMimicNT-G1-Shoot-Student-DAgger-v0` 与 `BbMimicNT-G1-Shoot-Student-Play-v0`。Teacher 保持原始 479 维无噪声、无观测延迟输入；Student 使用固定 283 维显式缩放输入：phase、三帧重力投影、pelvis 角速度、nominal-relative 关节位置、关节速度、实际执行动作，以及 reset 时固定的 hoop–pelvis 相对位置。机器人传感量训练时加入可调高斯噪声与每回合采样一次的 0–4 步延迟，推理固定为 2 步。
+Student 训练和播放任务分别为 `BbMimicNT-G1-Shoot-Student-DAgger-v0` 与 `BbMimicNT-G1-Shoot-Student-Play-v0`。Teacher 保持 674 维无噪声、无观测延迟输入；Student 默认使用 469 维显式缩放输入：phase、五帧重力投影、pelvis 角速度、nominal-relative 关节位置、关节速度、实际执行动作，以及 reset 时固定的 hoop–pelvis 相对位置。机器人传感量训练时加入可调高斯噪声与每回合采样一次的 0–3 步延迟，推理固定为标称 1 步。`student_observation.history_length=5` 在 100 Hz 下覆盖 40 ms，输入维度为 `93 * history_length + 4`。历史、导出和网络输入维度共用这一配置。
 
-Student 输出 29 维 nominal-relative 关节位置（rad），直接形成 PD target，不经过滤波。它与 Teacher 共用 PD 参数、动作执行延迟以及全部动力学/外力 DR；动作延迟参数从 Teacher checkpoint 对应的环境配置读取，新默认为标称 0、采样 0–2 步，已有 checkpoint 保留原配置。Student 观测延迟仍为训练 0–4 步、推理 2 步。Student 训练从第一个 iteration 起使用完整 DR 范围，reference 始终以 1× 推进。DAgger 在前 20% 完全由 Teacher 执行，20%–50% 通过 smoothstep 概率逐环境混合，从 50% 起完全由 Student 执行；所有访问状态始终由冻结 Teacher 标注。
+Student 输出 29 维 nominal-relative 关节位置（rad），直接形成 PD target，不经过滤波。它与 Teacher 共用 PD 参数、动作执行延迟以及全部动力学/外力 DR；动作延迟参数从 Teacher checkpoint 对应的环境配置读取，新默认为标称 0、采样 0–2 步，已有 checkpoint 保留原配置。Student 观测延迟由 `student_observation.delay_nominal_steps=1`、`delay_min_steps=0`、`delay_max_steps=3` 独立控制；只把标称改为 0 时，完整采样范围仍是 0–3 步，推理固定 0 步。三个值须满足 `0 <= min <= nominal <= max`；固定零延迟设为 `0, 0, 0`。观测噪声和延迟范围在前 20% 训练内按 smoothstep 增强，初始延迟固定在标称值；设置 `student_observation.full_strength=True` 可直接使用完整观测扰动。Student 使用独立的 `StudentDomainRandomizationCfg` 控制课程，Teacher checkpoint 只同步扰动范围，不覆盖课程及播放开关，设置对应 `dr.<项>.full_strength=True` 可使用完整范围，reference 始终以 1× 推进。DAgger 在前 10% 完全由 Teacher 执行，10%–30% 通过 smoothstep 概率逐环境混合，从 30% 起完全由 Student 执行；所有访问状态始终由冻结 Teacher 标注。
+
+默认训练 1000 轮，Student 课程按本次总迭代数计算，可在 `bb_mimic_nt_student_env_cfg.py` 独立调整：
+
+| 项目 | 开始扩展 | 达到完整范围 | 默认迭代数 |
+| --- | ---: | ---: | ---: |
+| 观测噪声 / 观测延迟 | 0% | 20% | 0–200 |
+| 质量 / PD / 摩擦 DR | 5% | 25% | 50–250 |
+| 动作执行延迟 | 10% | 30% | 100–300 |
+| Push | 10% | 35% | 100–350 |
+| Student 接管概率 | 10% | 30%（完全接管） | 100–300 |
+
+350 轮后，Student 独立执行且全部扰动达到完整范围，剩余约 650 轮用于完整扰动训练。`--max-iterations` 会按比例缩放这些时间点；Teacher 的训练课程保持原配置。播放关闭随机化的设置也不会被加载 Teacher 配置重新开启。
 
 ```bash
 python scripts/rsl_rl/train_dagger.py \
@@ -139,7 +151,9 @@ python scripts/rsl_rl/train_dagger.py \
   --headless
 ```
 
-Teacher 的网络结构、动作缩放和 DR 参数从所选 checkpoint 的 `params/` 读取。训练前即写出 `params/env.yaml`、`params/agent.yaml` 和 `params/student_config.json`；每个 `model_*.pt` 都包含独立导出所需的模型结构与部署 metadata。默认每轮收集 24 步并更新 32 次；回放容量的一半保存最新 FIFO 状态、一半作为全历史 reservoir，每个 batch 默认 75% 采样最新状态，避免 Student 接管后的闭环状态被旧数据稀释。回放数据常驻训练 device，避免 rollout 期间 CPU/GPU 往返；如需在恢复训练时连同回放集恢复，可添加 `--save-replay`。
+Teacher 的网络结构、动作缩放、DR 范围、参考轨迹、前后 HOLD 和 reset 关节噪声从所选 checkpoint 的 `params/` 读取。Student 保持关闭 RSI 和自适应速度。训练前即写出 `params/env.yaml`、`params/agent.yaml` 和 `params/student_config.json`；每个 `model_*.pt` 都包含独立导出所需的模型结构与部署 metadata。默认每轮收集 24 步并更新 32 次；回放容量为 524288，一半保存最新 FIFO 状态、一半作为会持续更新的全历史 reservoir。8192 个环境时 recent 可容纳 32 步，覆盖默认完整 rollout；469 维输入时两分区合计约占 1.0 GB 显存，每个 batch 默认 75% 采样最新状态，保留最新闭环状态与历史覆盖。回放数据常驻训练 device，避免 rollout 期间 CPU/GPU 往返；如需在恢复训练时连同回放集恢复，可添加 `--save-replay`。
+
+新默认配置需要从头训练，旧的 283 维 checkpoint 不能续训为 469 维。旧导出模型仍可播放，加载时会从 metadata 恢复其 3 帧历史和原延迟。DAgger 日志增加每关节目标 MAE、Student/Teacher 目标逐步变化 RMS、目标变化差、失败回合比例与回合步数；动作变化指标排除跨 reset 的跳变，均以 rad 为单位。
 
 ```bash
 python scripts/rsl_rl/play_student.py \
@@ -163,3 +177,5 @@ python scripts/rsl_rl/export_student.py \
 ```
 
 交互播放支持 `V` reference 点、`,` / `.` 切换 clip、`P` 或空格暂停/恢复、`R` 重启、`--all-clips`、`--ignore-failures` 和 `--no-timeout`。导出目录包含 `student_weights.pt`、TorchScript、ONNX 与 `student_config.json`；配置记录观测顺序/缩放、关节顺序、nominal pose、安全限位、PD 参数和固定标称延迟。成对评估对相同 clip 分别运行 Teacher 与 Student，输出篮球首次触地相对篮筐的水平落点和最高高度。
+
+Student 真机导出流程、phase/初始化契约、参考观测构造器及 READY 验证见 [部署说明](docs/student_deployment.md)。

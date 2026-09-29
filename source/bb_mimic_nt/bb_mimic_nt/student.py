@@ -2,20 +2,44 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 
 
-STUDENT_OBSERVATION_DIM = 283
+STUDENT_HISTORY_LENGTH = 5
 STUDENT_ACTION_DIM = 29
-STUDENT_OBSERVATION_FIELDS = (
-    ("phase", 1),
-    ("projected_gravity_history", 9),
-    ("pelvis_angular_velocity_history", 9),
-    ("joint_position_offset_history", 87),
-    ("joint_velocity_history", 87),
-    ("applied_action_offset_history", 87),
-    ("initial_hoop_position_b", 3),
-)
+
+
+def student_observation_fields(history_length: int) -> tuple[tuple[str, int], ...]:
+    if not isinstance(history_length, int) or history_length < 1:
+        raise ValueError("Student history length must be a positive integer.")
+    return (
+        ("phase", 1),
+        ("projected_gravity_history", 3 * history_length),
+        ("pelvis_angular_velocity_history", 3 * history_length),
+        ("joint_position_offset_history", 29 * history_length),
+        ("joint_velocity_history", 29 * history_length),
+        ("applied_action_offset_history", 29 * history_length),
+        ("initial_hoop_position_b", 3),
+    )
+
+
+STUDENT_OBSERVATION_FIELDS = student_observation_fields(STUDENT_HISTORY_LENGTH)
+STUDENT_OBSERVATION_DIM = sum(size for _, size in STUDENT_OBSERVATION_FIELDS)
+
+
+def student_delay_bounds(nominal: int, minimum: int, maximum: int, strength: float = 1.0) -> tuple[int, int]:
+    """Expand an integer sampling interval around nominal without negative delays."""
+    if any(not isinstance(value, int) for value in (nominal, minimum, maximum)):
+        raise ValueError("Student observation delay steps must be integers.")
+    if not 0 <= minimum <= nominal <= maximum:
+        raise ValueError("Student observation delay must satisfy 0 <= minimum <= nominal <= maximum.")
+    if not math.isfinite(strength) or not 0.0 <= strength <= 1.0:
+        raise ValueError("Student observation curriculum strength must be in [0, 1].")
+    low = nominal - math.floor((nominal - minimum) * strength + 1.0e-6)
+    high = nominal + math.floor((maximum - nominal) * strength + 1.0e-6)
+    return low, high
 
 
 def student_teacher_target(
@@ -70,7 +94,7 @@ def student_history(
     history: torch.Tensor,
     cursor: torch.Tensor,
     delay: torch.Tensor,
-    length: int = 3,
+    length: int = STUDENT_HISTORY_LENGTH,
 ) -> torch.Tensor:
     """Select per-environment history frames in oldest-to-newest order."""
     if length < 1 or history.ndim != 3:
@@ -157,8 +181,8 @@ class StudentReplay:
                 keep[:-1] = sorted_destinations[:-1] != sorted_destinations[1:]
                 source = accepted[order[keep]] + fill
                 target = sorted_destinations[keep]
-                self.observations[target].copy_(observations[source])
-                self.labels[target].copy_(labels[source])
+                self.observations.index_copy_(0, target, observations[source])
+                self.labels.index_copy_(0, target, labels[source])
         recent_count = min(count, self.recent_capacity)
         recent_observations = observations[-recent_count:]
         recent_labels = labels[-recent_count:]
@@ -237,7 +261,3 @@ class StudentReplay:
         self.labels[:history_size].copy_(state["labels"].to(self.device))
         self.recent_observations[:recent_size].copy_(state["recent_observations"].to(self.device))
         self.recent_labels[:recent_size].copy_(state["recent_labels"].to(self.device))
-
-
-if sum(width for _, width in STUDENT_OBSERVATION_FIELDS) != STUDENT_OBSERVATION_DIM:
-    raise RuntimeError("Student observation field contract does not total 283 dimensions.")

@@ -7,26 +7,29 @@ import torch
 from isaaclab.managers import ManagerTermBase
 from isaaclab.utils.math import quat_apply_inverse
 
-from bb_mimic_nt.student import STUDENT_OBSERVATION_DIM, student_history
+from bb_mimic_nt.student import student_delay_bounds, student_history, student_observation_fields
+
+from .events import curriculum_strength
 
 
 class StudentObservation(ManagerTermBase):
-    """Build the fixed 283-value deployable Student observation on the simulation device."""
+    """Build deployable Student history with per-episode latency and sensor noise."""
 
     _SENSOR_DIM = 64
     _ACTION_DIM = 29
-    _HISTORY_LENGTH = 3
 
     def __init__(self, cfg, env):
         super().__init__(cfg, env)
         settings = env.cfg.student_observation
-        maximum_delay = settings.delay_nominal_steps + settings.delay_max_offset_steps
-        if settings.delay_nominal_steps < settings.delay_max_offset_steps or maximum_delay < 0:
-            raise ValueError("Student observation delay must define non-negative 0..maximum steps.")
+        _, maximum_delay = student_delay_bounds(
+            settings.delay_nominal_steps, settings.delay_min_steps, settings.delay_max_steps
+        )
+        self.history_length = settings.history_length
+        self.observation_dim = sum(size for _, size in student_observation_fields(self.history_length))
         count = env.num_envs
-        sensor_slots = maximum_delay + self._HISTORY_LENGTH
+        sensor_slots = maximum_delay + self.history_length
         self._sensor = torch.zeros((sensor_slots, count, self._SENSOR_DIM), device=env.device)
-        self._action = torch.zeros((self._HISTORY_LENGTH, count, self._ACTION_DIM), device=env.device)
+        self._action = torch.zeros((self.history_length, count, self._ACTION_DIM), device=env.device)
         self._initial_hoop = torch.zeros((count, 3), device=env.device)
         self._sensor_cursor = torch.full((count,), -1, dtype=torch.long, device=env.device)
         self._action_cursor = torch.full((count,), -1, dtype=torch.long, device=env.device)
@@ -50,7 +53,19 @@ class StudentObservation(ManagerTermBase):
         settings = self._env.cfg.student_observation
         return (
             self.delay_steps.float() - settings.delay_nominal_steps
-        ) / max(settings.delay_max_offset_steps, 1)
+        ) / max(
+            settings.delay_nominal_steps - settings.delay_min_steps,
+            settings.delay_max_steps - settings.delay_nominal_steps,
+            1,
+        )
+
+    @property
+    def curriculum_strength(self) -> float:
+        env = self._env
+        context = getattr(env, "dr_context", None)
+        offset = 0 if context is None else context.iteration_offset
+        iteration = offset + env.common_step_counter / env.cfg.dr.steps_per_iteration
+        return curriculum_strength(env.cfg.student_observation, iteration, env.cfg.dr.total_iterations)
 
     def reset(self, env_ids=None) -> None:
         if env_ids is None:
@@ -60,9 +75,11 @@ class StudentObservation(ManagerTermBase):
         self._pending_reset[env_ids] = True
         settings = self._env.cfg.student_observation
         if settings.randomize_delay:
-            low = settings.delay_nominal_steps - settings.delay_max_offset_steps
-            high = settings.delay_nominal_steps + settings.delay_max_offset_steps + 1
-            self.delay_steps[env_ids] = torch.randint(low, high, (len(env_ids),), device=self.device)
+            low, high = student_delay_bounds(
+                settings.delay_nominal_steps, settings.delay_min_steps, settings.delay_max_steps,
+                self.curriculum_strength,
+            )
+            self.delay_steps[env_ids] = torch.randint(low, high + 1, (len(env_ids),), device=self.device)
         else:
             self.delay_steps[env_ids] = settings.delay_nominal_steps
 
@@ -87,7 +104,9 @@ class StudentObservation(ManagerTermBase):
                 dim=-1,
             )
             if settings.enable_noise and settings.noise_strength > 0.0:
-                sensor = sensor + torch.randn_like(sensor) * self._noise_std * settings.noise_strength
+                sensor = sensor + (
+                    torch.randn_like(sensor) * self._noise_std * settings.noise_strength * self.curriculum_strength
+                )
             applied_action = action.actual_action_offset
             reset_ids = ids[self._pending_reset[ids]]
             if len(reset_ids):
@@ -102,11 +121,12 @@ class StudentObservation(ManagerTermBase):
             self._last_step[ids] = step
             self._pending_reset[ids] = False
 
-        sensor_frames = student_history(self._sensor, self._sensor_cursor, self.delay_steps)
+        sensor_frames = student_history(self._sensor, self._sensor_cursor, self.delay_steps, self.history_length)
         action_frames = student_history(
             self._action,
             self._action_cursor,
             torch.zeros_like(self._action_cursor),
+            self.history_length,
         )
         scales = settings.scales
         observation = torch.cat(
@@ -121,6 +141,6 @@ class StudentObservation(ManagerTermBase):
             ),
             dim=-1,
         )
-        if observation.shape[-1] != STUDENT_OBSERVATION_DIM:
+        if observation.shape[-1] != self.observation_dim:
             raise RuntimeError(f"Student observation contract changed to {observation.shape[-1]} values.")
         return observation
