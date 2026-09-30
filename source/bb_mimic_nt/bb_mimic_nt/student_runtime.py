@@ -98,6 +98,11 @@ def student_apply_teacher_config(env_cfg, checkpoint: Path) -> tuple[dict, dict]
         "reset_dof_pos_noise", "reset_dof_vel_noise", "default_clip_id",
     ):
         setattr(env_cfg.commands.motion, name, teacher_motion[name])
+    # Older checkpoints used full holds; preserve that behavior. Play always
+    # executes full holds, while distillation inherits the trained sampling.
+    if getattr(env_cfg.commands.motion, "hold_sampling_weights", (0.15, 0.15)) is not None:
+        weights = teacher_motion.get("hold_sampling_weights")
+        env_cfg.commands.motion.hold_sampling_weights = tuple(weights) if weights is not None else None
     return agent, environment
 
 

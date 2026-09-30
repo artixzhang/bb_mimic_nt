@@ -55,6 +55,37 @@ python scripts/rsl_rl/train.py \
 
 `training.py` 提供 PPO rollout 与 iteration 的默认值。训练入口把实际 `--max_iterations` 和 `num_steps_per_env` 写入 DR 与 RSI 课程；恢复训练时从 checkpoint iteration 接续。
 
+## 持球时间与采样比例
+
+在 `bb_mimic_nt_env_cfg.py` 的 `CommandsCfg.motion` 中设置：
+
+```python
+pre_hold_s=1.0,
+post_hold_s=1.0,
+hold_sampling_weights=(0.15, 0.15),
+```
+
+两个权重分别表示投篮前、投篮后的预期训练时间相对投篮动作时间的预算，不是 episode 概率。每次 reset 根据剩余参考动作的标称 1x 时长 `T`，分别以 `min(1, weight*T/hold_s)` 的概率加入完整持球段；未选中的阶段直接跳过，投篮动作照常执行。持球段选中后保留全部时长，因此将时间改成 5 秒或 10 秒仍能训练连续站立，同时降低被选中的次数，避免冲淡投篮样本。零时间或零权重跳过对应持球段；`None` 表示每次执行完整前后持球时间。短持球段无法达到预算时全部保留，不额外延长。
+
+默认预算在没有提前失败、关闭 RSI、动作按 1x 推进且持球时长足够时，对应约 76.9% 投篮、11.5% pre-hold、11.5% post-hold。提前失败和 adaptive speed 会改变实际占比；RSI 回合从动作中间开始，不添加 pre-hold，post-hold 根据剩余动作时长采样。日志 `sampling/{pre_hold,active,post_hold}/fraction` 汇报重置环境实际累计的阶段时间占比，不能当作严格全局配额。长 hold 会减少每单位训练步数内的重置次数，但预期投篮时间占比受上述预算控制。
+
+Teacher/Student 的 Play 配置关闭持球采样，完整执行设定时长。Student 蒸馏从 Teacher 归档环境继承持球时间和采样预算；旧 checkpoint 没有此字段时保持旧的完整持球逻辑。导出 JSON 同时记录训练预算和完整持球时间，部署无需复现训练的随机跳过机制。
+
+先微调 Teacher，让 phase=0 的初始姿势持球稳定，再蒸馏 Student。单独给旧 Teacher/Student 增加等待时间不能保证它已学会持球；有限 pre-hold 的训练也不等于无限等待已验证。
+
+## Object 奖励调节
+
+奖励参数在 `mdp/rewards.py` 的 `UnifiedRewardCfg`。当前 object 的顶层权重为 `global_weights[1]=0.25`，持球阶段门控为 1，ACTIVE 的自由球阶段由 `object_free_phase_weight=0.15` 降权，POST_HOLD/DONE 则关闭 object 和 relative 奖励。它不是全部关闭。
+
+需要更强的出手轨迹约束，可以手动将 `object_free_phase_weight` 从 `0.15` 调至 `0.3` 或 `0.5`，观察动作和投篮成功率后再决定是否设为 `1.0`（自由球阶段不降权）。也可在 Teacher 训练启动时传入 Hydra 覆盖：
+
+```bash
+python scripts/rsl_rl/train.py --task BbMimicNT-G1-Shoot-v0 --headless \
+  env.rewards.unified_mimic.params.settings.object_free_phase_weight=0.5
+```
+
+保留 POST_HOLD 门控：末帧 reference 球位置不再推进，继续奖励静止末帧球位置会错误约束仍在飞行的真实球。该奖励约束参考球的位置、方向和速度，不是直接的命中奖励；用 `shot_success` 检查投篮精度。提高门控权重改变 Teacher 的 PPO 奖励，Student DAgger 没有任务奖励，需要再蒸馏更新后的 Teacher。本次实现没有修改 object 奖励配置。
+
 ## Domain Randomization
 
 每次环境 reset 独立采样，直到下次 reset 保持不变。`env_cfg.dr` 为七项 DR 分别提供 `enabled`、`start_fraction` 和 `end_fraction`，并集中配置标称值、采样幅度和推力持续时间；默认在训练进度 20% 前使用标称值，20%–60% 通过 cubic smoothstep S 曲线平滑扩大范围，课程起止点斜率均为零。六维特权观测依次为延迟、篮球质量、PD 比例、手部摩擦、脚部摩擦、腿部及骨盆 link 质量比例，按完整范围映射到 [-1, 1]，标称值均为 0。

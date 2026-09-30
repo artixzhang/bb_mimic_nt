@@ -64,6 +64,8 @@ def build_deployment_contract(metadata: dict, batch: dict, motion_cfg) -> dict:
             speed=1., adaptive_speed=False, trigger='READY -> ACTIVE without clearing observation history or changing the frozen hoop vector',
             final='phase=1 during POST_HOLD; finish after post_hold_s; stopping policy does not imply disabling motor torque',
             trained_pre_hold_s=float(motion_cfg.pre_hold_s), trained_post_hold_s=float(motion_cfg.post_hold_s),
+            training_hold_sampling_weights=getattr(motion_cfg, 'hold_sampling_weights', None),
+            training_hold_sampling='whole hold segments sampled per reset; weights are expected hold time relative to nominal remaining active time, not phase increments; deployment uses full configured hold durations',
             ready_policy_validated=False,
             ready_validation='pre_hold_s=0 provides only a reset boundary, not training for indefinite phase-zero holding; validate or retrain both Teacher and Student with an extended PRE_HOLD',
             motion_profiles=profiles,

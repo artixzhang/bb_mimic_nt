@@ -146,6 +146,7 @@ class G1ShootStudentPlayEnvCfg(G1ShootStudentEnvCfg):
         self.scene.num_envs = 1
         self.commands.motion.enable_rsi = False
         self.commands.motion.randomize_clip = False
+        self.commands.motion.hold_sampling_weights = None
         self.student_observation.enable_noise = False
         self.student_observation.randomize_delay = False
         for name in ("delay", "ball_mass", "pd_gains", "hand_friction", "foot_friction", "link_mass", "push"):

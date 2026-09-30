@@ -172,8 +172,8 @@ class UnifiedRewardCfg:
     # position, direction, speed_magnitude, rotation
     object_weights: tuple[float, float, float, float] = (0.45, 0.35, 0.2, 0.0)
     object_sigmas: tuple[float, float, float, float] = (10.0, 5.0, 0.5, 1.0)
-    object_free_phase_weight: float = 0.15
-    relative_free_phase_weight: float = 0.0
+    object_free_phase_weight: float = 1.0
+    relative_free_phase_weight: float = 1.0
 
     link_pos_body_weights: dict[str, float] = {
         "left_hand": 2.0, 

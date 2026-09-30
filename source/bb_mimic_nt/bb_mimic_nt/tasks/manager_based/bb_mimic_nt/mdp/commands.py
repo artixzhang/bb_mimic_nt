@@ -19,7 +19,7 @@ from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.math import quat_apply, quat_apply_inverse, quat_error_magnitude, quat_inv, quat_mul
 
-from bb_mimic_nt.core import downward_hoop_crossing, interpolate_motion, rsi_probability, select_adaptive_speed
+from bb_mimic_nt.core import downward_hoop_crossing, hold_sampling_probability, interpolate_motion, rsi_probability, select_adaptive_speed
 from bb_mimic_nt.trajectory import (
     TRACKED_BODY_NAMES,
     cache_is_current,
@@ -120,6 +120,17 @@ class MotionReferenceCommand(CommandTerm):
         self.frame = torch.zeros(self.num_envs, device=self.device)
         self.stage = torch.full_like(self.clip_ids, STAGE_PRE_HOLD)
         self.hold_time = torch.zeros(self.num_envs, device=self.device)
+        # Actual per-episode durations; cfg holds remain the full-length contract.
+        self.pre_hold_duration = torch.zeros_like(self.hold_time)
+        self.post_hold_duration = torch.zeros_like(self.hold_time)
+        self.stage_duration = torch.zeros((self.num_envs, 3), device=self.device)
+        for duration in (cfg.pre_hold_s, cfg.post_hold_s):
+            hold_sampling_probability(self.hold_time, duration, 0.)
+        if cfg.hold_sampling_weights is not None:
+            if len(cfg.hold_sampling_weights) != 2:
+                raise ValueError("hold_sampling_weights must contain pre and post weights.")
+            for weight in cfg.hold_sampling_weights:
+                hold_sampling_probability(self.hold_time, 0., weight)
         self.speed = torch.zeros(self.num_envs, device=self.device)
         self.tracking_error_ema = torch.full(
             (self.num_envs,), cfg.adaptive_initial_error, device=self.device
@@ -381,6 +392,11 @@ class MotionReferenceCommand(CommandTerm):
             )
         for metric in self.metrics.values():
             metric[env_ids] = 0.0
+        stage_time = self.stage_duration[env_ids]
+        total_stage_time = stage_time.sum().clamp_min(self._env.step_dt)
+        for index, name in enumerate(("pre_hold", "active", "post_hold")):
+            extras[f"sampling/{name}/fraction"] = (stage_time[:, index].sum() / total_stage_time).item()
+        self.stage_duration[env_ids] = 0.
 
         if self.cfg.randomize_clip:
             sampled_clips = torch.randint(self.num_clips, (len(env_ids),), device=self.device)
@@ -397,13 +413,15 @@ class MotionReferenceCommand(CommandTerm):
         valid_frame_count = self.lengths[self.clip_ids[env_ids]].clamp_min(1)
         random_frames = torch.floor(torch.rand(len(env_ids), device=self.device) * valid_frame_count).float()
         self.frame[env_ids] = torch.where(use_rsi, random_frames, torch.zeros_like(random_frames))
+        self._sample_hold_durations(env_ids, use_rsi)
+        start_active = use_rsi | (self.pre_hold_duration[env_ids] == 0.)
         self.stage[env_ids] = torch.where(
-            use_rsi,
+            start_active,
             torch.full_like(self.stage[env_ids], STAGE_ACTIVE),
             torch.full_like(self.stage[env_ids], STAGE_PRE_HOLD),
         )
         self.hold_time[env_ids] = 0.0
-        self.speed[env_ids] = torch.where(use_rsi, torch.ones_like(random_frames), torch.zeros_like(random_frames))
+        self.speed[env_ids] = start_active.float()
         self.tracking_error_ema[env_ids] = self.cfg.adaptive_initial_error
         self.speed_update_elapsed[env_ids] = 0.0
         self.rsi_started[env_ids] = use_rsi
@@ -416,8 +434,7 @@ class MotionReferenceCommand(CommandTerm):
         self._previous_reference_dof_pos[env_ids] = self.reference["dof_pos"][env_ids]
         self._write_reference_state(env_ids)
         # ManagerBasedRLEnv resets the action manager before the command
-        # manager.  Synchronize again after selecting the new clip/RSI frame
-        # so the first PD target is exactly the newly written reference pose.
+        # manager. Synchronize after selecting the new clip/RSI frame.
         self._env.action_manager.get_term("joint_pos").synchronize_reference(env_ids)
         self.previous_ball_above_hoop[env_ids] = (
             self.reference["object_pos"][env_ids, 2] - self.reference["hoop_pos"][env_ids, 2]
@@ -425,6 +442,25 @@ class MotionReferenceCommand(CommandTerm):
         self.time_left[env_ids] = 1.0e9
         self.command_counter[env_ids] = 1
         return extras
+
+    def _sample_hold_durations(self, env_ids: torch.Tensor, use_rsi: torch.Tensor) -> None:
+        remaining_frames = (self.lengths[self.clip_ids[env_ids]] - 1).float() - self.frame[env_ids]
+        active_duration = remaining_frames.clamp_min(0.) / self.fps
+        for index, (buffer, duration) in enumerate((
+            (self.pre_hold_duration, self.cfg.pre_hold_s),
+            (self.post_hold_duration, self.cfg.post_hold_s),
+        )):
+            if self.cfg.hold_sampling_weights is None:
+                buffer[env_ids] = duration
+            else:
+                probability = hold_sampling_probability(
+                    active_duration, duration, self.cfg.hold_sampling_weights[index]
+                )
+                buffer[env_ids] = (torch.rand(len(env_ids), device=self.device) < probability).float() * duration
+        # RSI starts inside the action and cannot prepend an initial-frame hold.
+        self.pre_hold_duration[env_ids] = torch.where(
+            use_rsi, 0., self.pre_hold_duration[env_ids]
+        )
 
     def set_clip_ids(self, clip_ids: int | torch.Tensor, env_ids: Sequence[int] | None = None) -> None:
         if env_ids is None:
@@ -613,10 +649,12 @@ class MotionReferenceCommand(CommandTerm):
 
     def _update_command(self) -> None:
         dt = self._env.step_dt
+        for index in range(3):
+            self.stage_duration[:, index] += (self.stage == index).float() * dt
         pre = self.stage == STAGE_PRE_HOLD
         post = self.stage == STAGE_POST_HOLD
         self.hold_time[pre | post] += dt
-        start_ids = (pre & (self.hold_time + 1.0e-6 >= self.cfg.pre_hold_s)).nonzero(as_tuple=False).flatten()
+        start_ids = (pre & (self.hold_time + 1.0e-6 >= self.pre_hold_duration)).nonzero(as_tuple=False).flatten()
         self.stage[start_ids] = STAGE_ACTIVE
         self.speed[start_ids] = 1.0
         self.tracking_error_ema[start_ids] = self.cfg.adaptive_initial_error
@@ -659,7 +697,7 @@ class MotionReferenceCommand(CommandTerm):
         # Terminations are evaluated before CommandManager.compute. Mark done
         # one policy interval early so the triggering physics frame completes
         # exactly post_hold_s seconds of last-frame tracking.
-        done_threshold = max(self.cfg.post_hold_s - dt, 0.0)
+        done_threshold = (self.post_hold_duration - dt).clamp_min(0.)
         finished = (self.stage == STAGE_POST_HOLD) & (self.hold_time + 1.0e-6 >= done_threshold)
         self.stage[finished] = STAGE_DONE
         self.speed[finished] = 0.0
@@ -726,8 +764,11 @@ class MotionReferenceCommandCfg(CommandTermCfg):
     hoop_root_quat: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
     tracked_body_names: list[str] = list(TRACKED_BODY_NAMES)
     auto_preprocess: bool = True
-    pre_hold_s: float = 0.0
+    pre_hold_s: float = 1.0
     post_hold_s: float = 1.0
+    # Expected time relative to nominal 1x active time: (pre, post).
+    # None executes both full holds every episode (play/legacy behavior).
+    hold_sampling_weights: tuple[float, float] | None = None
     randomize_clip: bool = True
     default_clip_id: int = 0
     enable_rsi: bool = True

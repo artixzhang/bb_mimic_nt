@@ -86,7 +86,8 @@ def test_export_rejects_inconsistent_history_metadata():
 
 
 @pytest.mark.parametrize('enabled', [True, False])
-def test_teacher_loading_preserves_student_curriculum_and_play_flags(monkeypatch, enabled):
+@pytest.mark.parametrize('hold_weights', [None, (.2, .3)])
+def test_teacher_loading_preserves_student_curriculum_and_play_flags(monkeypatch, enabled, hold_weights):
     import bb_mimic_nt.student_runtime as runtime
 
     names = ('delay', 'ball_mass', 'pd_gains', 'hand_friction', 'foot_friction', 'link_mass', 'push')
@@ -102,15 +103,18 @@ def test_teacher_loading_preserves_student_curriculum_and_play_flags(monkeypatch
     motion = dict(source_path='motion.pkl', cache_path='motion.pt', urdf_path='robot.urdf',
                   pre_hold_s=0., post_hold_s=1., reset_dof_pos_noise=.05,
                   reset_dof_vel_noise=.05, default_clip_id=0)
+    if hold_weights is not None:
+        motion['hold_sampling_weights'] = hold_weights
     environment = dict(dr=archived, actions=dict(joint_pos=action), commands=dict(motion=motion))
     monkeypatch.setattr(runtime, 'student_teacher_configs', lambda checkpoint: ({}, environment))
     cfg = SimpleNamespace(dr=SimpleNamespace(**{
         name: SimpleNamespace(enabled=enabled, start_fraction=.1, end_fraction=.35, full_strength=False)
         for name in names}), actions=SimpleNamespace(joint_pos=SimpleNamespace()),
-        commands=SimpleNamespace(motion=SimpleNamespace()))
+        commands=SimpleNamespace(motion=SimpleNamespace(hold_sampling_weights=(.15, .15) if enabled else None)))
     runtime.student_apply_teacher_config(cfg, None)
     assert cfg.dr.push_force_max_n == (20., 20., 8.)
     assert cfg.dr.delay_nominal_steps == 0
+    assert cfg.commands.motion.hold_sampling_weights == (hold_weights if enabled else None)
     for name in names:
         schedule = getattr(cfg.dr, name)
         assert schedule.enabled == enabled

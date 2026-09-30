@@ -86,8 +86,8 @@ class DomainRandomizationCfg:
     foot_friction_nominal: float = 0.9
     foot_friction_delta: float = 0.3
     link_mass_fraction: float = 0.10
-    push_force_min_n: tuple[float, float, float] = (8.0, 8.0, 3.0)
-    push_force_max_n: tuple[float, float, float] = (20.0, 20.0, 8.0)
+    push_force_min_n: tuple[float, float, float] = (10.0, 10.0, 5.0)
+    push_force_max_n: tuple[float, float, float] = (30.0, 30.0, 12.0)
     push_torque_max_nm: float = 5.0
     push_duration_s: float = 0.8
 
@@ -151,6 +151,9 @@ class CommandsCfg:
         cache_path=str(MOTION_CACHE),
         urdf_path=str(ROBOT_URDF),
         rsi_decay_steps=RSI_DECAY_STEPS,
+        pre_hold_s=5.0,
+        post_hold_s=5.0,
+        hold_sampling_weights=(0.60, 0.60),
         hoop_center_offset=BB_HOOP_CENTER_OFFSET,
         hoop_root_quat=BB_HOOP_ROOT_ROTATION,
     )
@@ -305,6 +308,7 @@ class G1ShootPlayEnvCfg(G1ShootEnvCfg):
         self.scene.num_envs = 1
         self.observations.policy.enable_corruption = False
         self.commands.motion.enable_rsi = False
+        self.commands.motion.hold_sampling_weights = None
         self.commands.motion.randomize_clip = False
         self.commands.motion.enable_adaptive_speed = False
         self.commands.motion.reset_dof_pos_noise = 0.0
