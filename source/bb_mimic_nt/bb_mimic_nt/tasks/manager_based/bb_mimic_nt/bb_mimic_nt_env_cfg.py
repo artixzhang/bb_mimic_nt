@@ -86,8 +86,8 @@ class DomainRandomizationCfg:
     foot_friction_nominal: float = 0.9
     foot_friction_delta: float = 0.3
     link_mass_fraction: float = 0.10
-    push_force_min_n: tuple[float, float, float] = (10.0, 10.0, 5.0)
-    push_force_max_n: tuple[float, float, float] = (30.0, 30.0, 12.0)
+    push_force_min_n: tuple[float, float, float] = (8.0, 8.0, 5.0)
+    push_force_max_n: tuple[float, float, float] = (20.0, 20.0, 10.0)
     push_torque_max_nm: float = 5.0
     push_duration_s: float = 0.8
 
