@@ -69,9 +69,9 @@ def object_lin_vel_b(env) -> torch.Tensor:
     return quat_apply_inverse(term.robot.data.root_link_quat_w, term.ball.data.root_lin_vel_w)
 
 
-def hoop_pos_b(env) -> torch.Tensor:
-    term = motion_command(env)
-    return _position_in_root_frame(term.hoop_center_pos_w(), term)
+def hoop_pos_cyl(env) -> torch.Tensor:
+    """Trajectory hoop coordinates in [r, theta, z] order, without a root-frame transform."""
+    return motion_command(env).reference["hoop_pos_cyl"]
 
 
 def previous_action(env) -> torch.Tensor:

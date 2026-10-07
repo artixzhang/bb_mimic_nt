@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -17,8 +18,19 @@ for name, expected in manifest['artifacts_sha256'].items():
     actual = hashlib.sha256((args.bundle / name).read_bytes()).hexdigest()
     if actual != expected:
         raise ValueError(f'Bundle checksum mismatch: {name}')
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "source/bb_mimic_nt"))
+from bb_mimic_nt.student_deployment import STUDENT_DEPLOYMENT_FORMAT, validate_student_config
+config = json.loads((args.bundle / 'student_config.json').read_text())
+if config.get('format') == STUDENT_DEPLOYMENT_FORMAT:
+    validate_student_config(config)
+elif config.get('format') != 'bb_mimic_nt_student_v1':
+    raise ValueError('Unsupported Student deployment configuration format.')
 vectors = np.load(args.bundle / 'verification_vectors.npz', allow_pickle=False)
 inputs, expected = vectors['observations'], vectors['action_offsets']
+if inputs.ndim != 2 or inputs.shape[1] != config['observation_dim']:
+    raise ValueError('Verification observation shape differs from configuration.')
+if expected.shape != (inputs.shape[0], config['action_dim']):
+    raise ValueError('Verification action shape differs from configuration.')
 if args.backend == 'torchscript':
     import torch
     model = torch.jit.load(str(args.bundle / 'student_policy.pt'), map_location=args.device).eval()

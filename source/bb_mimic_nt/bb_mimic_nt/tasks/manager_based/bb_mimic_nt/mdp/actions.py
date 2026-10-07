@@ -244,6 +244,18 @@ class StudentNominalJointPositionAction(ActionTerm):
         limits = self._asset.data.joint_pos_limits[:, self._joint_ids]
         self.lower = (limits[..., 0] + cfg.position_limit_margin).clone()
         self.upper = (limits[..., 1] - cfg.position_limit_margin).clone()
+        # v2 deployment carries final coordinates/limits, independent of Teacher scaling.
+        for name, tensor_name in (("nominal_joint_position", "nominal"),
+                                  ("safe_lower_joint_position", "lower"),
+                                  ("safe_upper_joint_position", "upper")):
+            saved = getattr(cfg, name, None)
+            if saved is not None:
+                values = torch.as_tensor(saved, dtype=self.nominal.dtype, device=self.device)
+                if values.shape != (len(self._joint_ids),) or not torch.isfinite(values).all():
+                    raise ValueError(f"Student deployment {name} has invalid values.")
+                setattr(self, tensor_name, values.expand(shape).clone())
+        if torch.any(self.lower < limits[..., 0] - 1.e-5) or torch.any(self.upper > limits[..., 1] + 1.e-5):
+            raise ValueError("Exported Student target limits exceed simulator joint limits.")
         if torch.any(self.lower >= self.upper):
             raise ValueError("Student action safe interval is empty.")
         if torch.any(self.nominal < self.lower) or torch.any(self.nominal > self.upper):
@@ -361,6 +373,10 @@ class StudentNominalJointPositionActionCfg(ActionTermCfg):
     minimum_residual_scale: float = 0.10
     maximum_residual_scale: float = 0.50
     position_limit_margin: float = 0.020
+    # Deployment overrides in cfg.joint_names order; training uses asset defaults.
+    nominal_joint_position: list[float] | None = None
+    safe_lower_joint_position: list[float] | None = None
+    safe_upper_joint_position: list[float] | None = None
     # Filled from the archived Teacher config for DAgger/evaluation. Keeping
     # this empty by default preserves compatibility with older Student exports.
     joint_maximum_residual_scales: dict[str, float] = {}

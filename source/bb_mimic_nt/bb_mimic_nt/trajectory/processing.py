@@ -18,7 +18,7 @@ import joblib
 import numpy as np
 import torch
 
-CACHE_SCHEMA_VERSION = 5
+CACHE_SCHEMA_VERSION = 6
 
 TRACKED_BODY_NAMES = (
     "left_hand",
@@ -94,6 +94,7 @@ _REQUIRED_KEYS = {
     "fps",
     "dof_names",
     "hoop_pos_w",
+    "hoop_pos_cyl",
 }
 
 
@@ -221,6 +222,7 @@ def _validate_clip(clip: dict[str, Any], clip_index: int) -> None:
         "contact": (frame_count, 4),
         "push_available": (frame_count,),
         "hoop_pos_w": (3,),
+        "hoop_pos_cyl": (3,),
     }
     if frame_count < 2:
         raise ValueError(f"Clip {clip_index} must contain at least two frames.")
@@ -525,6 +527,7 @@ def preprocess_motion_batch(
                 "release_rising": release_rising,
                 "release_falling": release_falling,
                 "push_available": np.asarray(clip["push_available"], dtype=np.float32),
+                "hoop_pos_cyl": np.repeat(np.asarray(clip["hoop_pos_cyl"], dtype=np.float32)[None], len(root_pos), axis=0),
                 "hoop_pos": np.repeat(np.asarray(clip["hoop_pos_w"], dtype=np.float32)[None], len(root_pos), axis=0),
                 "link_lin_vel_w": finite_difference(fk["link_pos_w"], dt),
                 "link_ang_vel_w": link_ang_vel,

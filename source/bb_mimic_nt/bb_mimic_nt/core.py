@@ -206,20 +206,22 @@ def gated_height_shortfall_cost(
 def clipped_regularization(
     costs: Sequence[torch.Tensor], weights: Sequence[float], maximum: float = 0.20
 ) -> torch.Tensor:
-    return sum(cost * weight for cost, weight in zip(costs, weights)).clamp_max(maximum)
+    """Smoothly cap the weighted cost, preserving unit slope near zero."""
+    if maximum <= 0.0:
+        raise ValueError("maximum must be positive.")
+    total = sum(cost * weight for cost, weight in zip(costs, weights))
+    return maximum * torch.tanh(total / maximum)
 
 
-def joint_jerk_cost(
-    velocity: torch.Tensor,
-    previous_velocity: torch.Tensor,
-    previous_acceleration: torch.Tensor,
+def action_accel_cost(
+    action: torch.Tensor,
+    previous_action: torch.Tensor,
+    previous_previous_action: torch.Tensor,
     history_length: torch.Tensor,
-    dt: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    acceleration = (velocity - previous_velocity) / dt
-    jerk = (acceleration - previous_acceleration) / dt
-    cost = torch.where(history_length >= 2, torch.mean(jerk.square(), dim=-1), 0.0)
-    return cost, acceleration
+) -> torch.Tensor:
+    """Mean squared second action difference, without dt scaling like action_rate."""
+    second_difference = action - 2.0 * previous_action + previous_previous_action
+    return torch.where(history_length >= 2, torch.mean(second_difference.square(), dim=-1), 0.0)
 
 
 def downward_hoop_crossing(

@@ -21,7 +21,7 @@ def student_observation_fields(history_length: int) -> tuple[tuple[str, int], ..
         ("joint_position_offset_history", 29 * history_length),
         ("joint_velocity_history", 29 * history_length),
         ("applied_action_offset_history", 29 * history_length),
-        ("initial_hoop_position_b", 3),
+        ("hoop_pos_cyl", 3),
     )
 
 

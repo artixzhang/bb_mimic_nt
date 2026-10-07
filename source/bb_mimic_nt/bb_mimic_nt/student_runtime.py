@@ -17,7 +17,10 @@ from rsl_rl.networks import MLP
 from bb_mimic_nt.student import (
     STUDENT_ACTION_DIM, STUDENT_OBSERVATION_DIM, student_delay_bounds, student_observation_fields,
 )
-from bb_mimic_nt.student_deployment import build_deployment_contract
+from bb_mimic_nt.student_deployment import (
+    STUDENT_DEPLOYMENT_FORMAT, build_deployment_contract, compact_student_config,
+    student_observation_scales, student_sensor_delay, validate_student_config,
+)
 from bb_mimic_nt.training import TEACHER_OBSERVATION_DIM
 
 
@@ -246,6 +249,10 @@ def student_read_artifact(weights: Path, config: Path | None = None) -> tuple[di
             "Pass --student-config or use a self-contained model_*.pt checkpoint."
         )
     metadata = json.loads(config.read_text(encoding="utf-8"))
+    manifest_path = config.with_name("manifest.json")
+    if metadata.get("format") == STUDENT_DEPLOYMENT_FORMAT and manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        metadata["_provenance"] = manifest.get("provenance", {})
     return state, metadata
 
 
@@ -268,6 +275,9 @@ def student_validate_resume_observation(previous: dict, current: dict) -> None:
 
 def student_artifact_history(metadata: dict) -> int:
     """Recover legacy three-frame exports and validate current history metadata."""
+    if metadata.get("format") == STUDENT_DEPLOYMENT_FORMAT:
+        validate_student_config(metadata)
+        return metadata["history_length"]
     dimension = metadata["observation_dim"]
     if not isinstance(dimension, int) or dimension <= 4 or (dimension - 4) % 93:
         raise ValueError("Student deployment configuration has incompatible observation dimensions.")
@@ -282,7 +292,7 @@ def student_artifact_history(metadata: dict) -> int:
 
 def student_policy_from_state(state: dict, metadata: dict, device: str) -> StudentPolicy:
     """Construct a deployable Student policy from an already-loaded state dictionary."""
-    if metadata.get("format") != "bb_mimic_nt_student_v1":
+    if metadata.get("format") not in ("bb_mimic_nt_student_v1", STUDENT_DEPLOYMENT_FORMAT):
         raise ValueError("Unsupported Student deployment configuration format.")
     student_artifact_history(metadata)
     if metadata["action_dim"] != STUDENT_ACTION_DIM:
@@ -300,6 +310,32 @@ def student_load_policy(weights: Path, config: Path | None, device: str) -> tupl
 
 
 def student_apply_deployment_config(env_cfg, metadata: dict) -> None:
+    if metadata.get("format") == STUDENT_DEPLOYMENT_FORMAT:
+        validate_student_config(metadata)
+        phase = metadata["phase"]
+        env_cfg.commands.motion.pre_hold_s = phase["pre_hold_s"]
+        env_cfg.commands.motion.post_hold_s = phase["post_hold_s"]
+        delay = student_sensor_delay(metadata)
+        env_cfg.student_observation.history_length = metadata["history_length"]
+        env_cfg.student_observation.delay_nominal_steps = delay
+        env_cfg.student_observation.delay_min_steps = delay
+        env_cfg.student_observation.delay_max_steps = delay
+        for name, value in student_observation_scales(metadata).items():
+            if name == "hoop_position":
+                radius, theta, height = value if isinstance(value, (list, tuple)) else (value,) * 3
+                if radius != height:
+                    raise ValueError("Simulation requires matching hoop radius and height scales.")
+                env_cfg.student_observation.scales.hoop_theta = float(theta)
+                value = radius
+            setattr(env_cfg.student_observation.scales, name, float(value))
+        env_cfg.student_observation.enable_noise = False
+        env_cfg.student_observation.randomize_delay = False
+        env_cfg.dr.delay_nominal_steps = metadata["action"]["delay_steps"]
+        # The simulation consumes the exact exported coordinates/limits; it
+        # does not reconstruct them from Teacher residual adapter parameters.
+        for name in ("nominal_joint_position", "safe_lower_joint_position", "safe_upper_joint_position"):
+            setattr(env_cfg.actions.joint_pos, name, list(metadata[name]))
+        return
     contract = metadata.get("deployment_contract")
     if contract is not None:
         env_cfg.commands.motion.pre_hold_s = contract["phase"]["trained_pre_hold_s"]
@@ -313,15 +349,13 @@ def student_apply_deployment_config(env_cfg, metadata: dict) -> None:
     student_delay_bounds(nominal, minimum, maximum)
     env_cfg.student_observation.delay_min_steps = minimum
     env_cfg.student_observation.delay_max_steps = maximum
+    env_cfg.student_observation.scales.hoop_theta = float(
+        settings["scales"].get("hoop_theta", settings["scales"].get("hoop_position", 0.25))
+    )
     for name, value in settings["scales"].items():
         setattr(env_cfg.student_observation.scales, name, float(value))
-    for name in (
-        "delay_nominal_steps",
-        "gravity_noise_std",
-        "angular_velocity_noise_std",
-        "joint_position_noise_std",
-        "joint_velocity_noise_std",
-    ):
+    for name in ("delay_nominal_steps", "gravity_noise_std", "angular_velocity_noise_std",
+                 "joint_position_noise_std", "joint_velocity_noise_std"):
         setattr(env_cfg.student_observation, name, settings[name])
     env_cfg.student_observation.enable_noise = False
     env_cfg.student_observation.randomize_delay = False
@@ -331,45 +365,23 @@ def student_apply_deployment_config(env_cfg, metadata: dict) -> None:
 
 
 def student_validate_deployment(env, metadata: dict) -> None:
+    """Check the policy interface while allowing different simulation settings."""
     if env.observation_manager.group_obs_dim["policy"] != (metadata["observation_dim"],):
         raise ValueError("Student export observation dimension does not match the environment.")
-    if abs(metadata["policy_hz"] * env.step_dt - 1.) > 1.e-6:
-        raise ValueError("Student policy frequency differs from deployment configuration.")
-    contract = metadata.get("deployment_contract")
-    if contract is not None:
-        motion = env.command_manager.get_term("motion")
-        for profile in contract["phase"]["motion_profiles"]:
-            if (profile["clip_id"] >= len(motion.lengths)
-                or int(motion.lengths[profile["clip_id"]]) != profile["frame_count"]
-                or abs(motion.fps - profile["reference_fps"]) > 1.e-6):
-                raise ValueError("Deployment reference timing differs from the exported policy motion.")
-        for key in ("motion_source_sha256", "robot_urdf_sha256"):
-            source_key = "source_sha256" if key == "motion_source_sha256" else "urdf_sha256"
-            expected = contract["provenance"].get(key)
-            if expected and expected != motion._batch["metadata"].get(source_key):
-                raise ValueError(f"Deployment {key} differs from exported motion metadata.")
+    compact = metadata.get("format") == STUDENT_DEPLOYMENT_FORMAT
+    if compact:
+        validate_student_config(metadata)
     action = env.action_manager.get_term("joint_pos")
     if metadata["joint_names"] != list(action.cfg.joint_names):
         raise ValueError("Student export joint order does not match the environment.")
-    robot = env.scene["robot"]
-    joint_ids = action._joint_ids
-    tensors = {
-        "nominal_joint_position": action.nominal[0],
-        "safe_lower_joint_position": action.lower[0],
-        "safe_upper_joint_position": action.upper[0],
-        "pd_stiffness": robot.data.default_joint_stiffness[0, joint_ids],
-        "pd_damping": robot.data.default_joint_damping[0, joint_ids],
-    }
-    for name, current in tensors.items():
-        saved = torch.as_tensor(metadata[name], device=current.device)
-        if not torch.allclose(current, saved, rtol=0.0, atol=1.0e-5):
-            raise ValueError(f"Student export {name} differs from the environment.")
 
 
-def student_prepare_export_metadata(metadata: dict) -> dict:
+def student_prepare_export_metadata(metadata: dict, provenance: dict | None = None) -> dict:
     """Require a complete contract, recovering legacy metadata from archived motion configuration."""
     metadata = json.loads(json.dumps(metadata, allow_nan=False))
     metadata["history_length"] = student_artifact_history(metadata)
+    if metadata.get("format") == STUDENT_DEPLOYMENT_FORMAT:
+        return compact_student_config(metadata)
     if "deployment_contract" not in metadata:
         if not metadata.get("teacher_checkpoint"):
             raise ValueError("Export needs deployment motion metadata or an accessible archived Teacher checkpoint.")
@@ -381,31 +393,35 @@ def student_prepare_export_metadata(metadata: dict) -> dict:
         batch = torch.load(cache, map_location="cpu", weights_only=False)
         metadata["deployment_contract"] = build_deployment_contract(metadata, batch, SimpleNamespace(**motion))
         metadata["deployment_contract"]["provenance"]["recovered_from_archived_cache"] = True
-    contract = metadata["deployment_contract"]
-    if contract.get("schema") != "bb_mimic_nt_deployment_contract_v1":
-        raise ValueError("Unsupported deployment contract schema.")
-    if len(metadata["joint_names"]) != STUDENT_ACTION_DIM or len(set(metadata["joint_names"])) != STUDENT_ACTION_DIM:
-        raise ValueError("Deployment requires 29 distinct joint names.")
-    if metadata["policy_hz"] <= 0 or abs(contract["policy_period_s"] * metadata["policy_hz"] - 1.) > 1.e-6:
-        raise ValueError("Deployment control period and frequency disagree.")
-    if not contract["phase"]["motion_profiles"]:
-        raise ValueError("Deployment needs at least one motion profile.")
-    for name in ("nominal_joint_position", "safe_lower_joint_position", "safe_upper_joint_position", "pd_stiffness", "pd_damping"):
-        values = torch.as_tensor(metadata[name])
-        if values.shape != (STUDENT_ACTION_DIM,) or not torch.isfinite(values).all():
-            raise ValueError(f"Deployment {name} must contain 29 finite values.")
-    lower = torch.tensor(metadata["safe_lower_joint_position"])
-    upper = torch.tensor(metadata["safe_upper_joint_position"])
-    nominal = torch.tensor(metadata["nominal_joint_position"])
-    if torch.any(lower >= upper) or torch.any(nominal < lower) or torch.any(nominal > upper):
-        raise ValueError("Deployment joint limits/nominal position are invalid.")
-    if min(metadata["pd_stiffness"]) <= 0 or min(metadata["pd_damping"]) < 0:
-        raise ValueError("Deployment PD gains must have positive Kp and non-negative Kd.")
-    return metadata
+    if provenance is not None:
+        provenance.update(metadata["deployment_contract"].get("provenance", {}))
+    return compact_student_config(metadata)
 
 
-def student_export(policy: StudentPolicy, destination: Path, metadata: dict) -> None:
-    metadata = student_prepare_export_metadata(metadata)
+def student_export(
+    policy: StudentPolicy, destination: Path, metadata: dict, *,
+    source_path: Path | None = None, source_iteration: int | None = None,
+) -> None:
+    # Read the source before writing artifacts, including in-place re-exports.
+    source = metadata.get("export_source", metadata.get("_provenance", {}).get("export_source"))
+    if source_path is not None:
+        source_path = source_path.resolve()
+        with source_path.open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        source = dict(path=str(source_path), file=source_path.name,
+                      size_bytes=source_path.stat().st_size, sha256=digest)
+        if source_iteration is not None:
+            source["iteration"] = source_iteration
+    # Other provenance stays beside the runtime interface, including on v2 re-export.
+    provenance = dict(metadata.get("_provenance", {}))
+    provenance.update(metadata.get("deployment_contract", {}).get("provenance", {}))
+    for key in ("teacher_checkpoint", "teacher_sha256", "export_source"):
+        if metadata.get(key) is not None:
+            provenance[key] = metadata[key]
+    metadata = student_prepare_export_metadata(metadata, provenance)
+    if source is not None:
+        metadata["export_source"] = source
+        provenance["export_source"] = source
     destination.mkdir(parents=True, exist_ok=True)
     policy.eval()
     state = {key: value.detach().cpu() for key, value in policy.student.state_dict().items()}
@@ -462,6 +478,7 @@ def student_export(policy: StudentPolicy, destination: Path, metadata: dict) -> 
                  "verification_vectors.npz"]
     manifest = {
         "schema": "bb_mimic_nt_student_bundle_v1",
+        "provenance": provenance,
         "artifacts_sha256": {name: hashlib.sha256((destination / name).read_bytes()).hexdigest() for name in artifacts},
         "verification": {"torchscript_matches_pytorch": True, "onnx_structure_checked": True,
                          "onnx_reference_matches_pytorch": True, "onnx_runtime_matches_pytorch": False, "robot_validated": False},

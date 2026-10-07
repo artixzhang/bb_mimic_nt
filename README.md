@@ -106,7 +106,7 @@ python scripts/rsl_rl/train.py --task BbMimicNT-G1-Shoot-v0 --headless \
 
 TensorBoard 除 reward/termination 外，还记录 `Metrics/motion/error/*` 的原始 reference tracking error，以及 `Metrics/motion/control/*` 的 action 变化、PD target 变化、action 饱和率、关节速度和力矩占比。`Metrics/motion/phase/{controlled,free}/*` 按 `release` 分段汇总，`error/joint/*` 与 `control/joint/*` 提供逐关节误差和动作幅度。这些指标带有物理单位，适合排查 reward 上升但动作抖动的问题。
 
-`reg/joint_jerk` 根据连续三个 100 Hz 策略步的关节速度计算加速度变化率，reset 后前两步不计罚。默认权重为 `2e-10`，训练时可通过 `Reward/reg/joint_jerk` 监控原始代价。
+`reg/action_accel` 使用策略直接输出的 action（`env.action_manager.action`，未经 tanh、残差缩放或执行延迟），按连续三个策略步计算二阶差分平方均值 `mean((a_t - 2*a_{t-1} + a_{t-2})²)`。与 `action_rate` 一致，该项衡量逐步变化，不做 dt 归一化。该项不依赖物理引擎的关节速度，reset 后前两步不计罚。默认 `action_accel_weight` 为 `1e-11`，训练时可通过 `Reward/reg/action_accel` 监控原始代价；权重可独立调整。
 
 ## 播放、交互与评估
 
@@ -160,7 +160,7 @@ PYTHONPATH=source/bb_mimic_nt pytest -q tests
 
 ## Student DAgger
 
-Student 训练和播放任务分别为 `BbMimicNT-G1-Shoot-Student-DAgger-v0` 与 `BbMimicNT-G1-Shoot-Student-Play-v0`。Teacher 保持 674 维无噪声、无观测延迟输入；Student 默认使用 469 维显式缩放输入：phase、五帧重力投影、pelvis 角速度、nominal-relative 关节位置、关节速度、实际执行动作，以及 reset 时固定的 hoop–pelvis 相对位置。机器人传感量训练时加入可调高斯噪声与每回合采样一次的 0–3 步延迟，推理固定为标称 1 步。`student_observation.history_length=5` 在 100 Hz 下覆盖 40 ms，输入维度为 `93 * history_length + 4`。历史、导出和网络输入维度共用这一配置。
+Student 训练和播放任务分别为 `BbMimicNT-G1-Shoot-Student-DAgger-v0` 与 `BbMimicNT-G1-Shoot-Student-Play-v0`。Teacher 保持 674 维无噪声、无观测延迟输入；Student 默认使用 469 维显式缩放输入：phase、五帧重力投影、pelvis 角速度、nominal-relative 关节位置、关节速度、实际执行动作，以及 reset 时固定的轨迹篮筐柱坐标 `hoop_pos_cyl`（`[r, theta, z]`）。机器人传感量训练时加入可调高斯噪声与每回合采样一次的 0–3 步延迟，推理固定为标称 1 步。`student_observation.history_length=5` 在 100 Hz 下覆盖 40 ms，输入维度为 `93 * history_length + 4`。历史、导出和网络输入维度共用这一配置。
 
 Student 输出 29 维 nominal-relative 关节位置（rad），直接形成 PD target，不经过滤波。它与 Teacher 共用 PD 参数、动作执行延迟以及全部动力学/外力 DR；动作延迟参数从 Teacher checkpoint 对应的环境配置读取，新默认为标称 0、采样 0–2 步，已有 checkpoint 保留原配置。Student 观测延迟由 `student_observation.delay_nominal_steps=1`、`delay_min_steps=0`、`delay_max_steps=3` 独立控制；只把标称改为 0 时，完整采样范围仍是 0–3 步，推理固定 0 步。三个值须满足 `0 <= min <= nominal <= max`；固定零延迟设为 `0, 0, 0`。观测噪声和延迟范围在前 20% 训练内按 smoothstep 增强，初始延迟固定在标称值；设置 `student_observation.full_strength=True` 可直接使用完整观测扰动。Student 使用独立的 `StudentDomainRandomizationCfg` 控制课程，Teacher checkpoint 只同步扰动范围，不覆盖课程及播放开关，设置对应 `dr.<项>.full_strength=True` 可使用完整范围，reference 始终以 1× 推进。DAgger 在前 10% 完全由 Teacher 执行，10%–30% 通过 smoothstep 概率逐环境混合，从 30% 起完全由 Student 执行；所有访问状态始终由冻结 Teacher 标注。
 
@@ -210,3 +210,21 @@ python scripts/rsl_rl/export_student.py \
 交互播放支持 `V` reference 点、`,` / `.` 切换 clip、`P` 或空格暂停/恢复、`R` 重启、`--all-clips`、`--ignore-failures` 和 `--no-timeout`。导出目录包含 `student_weights.pt`、TorchScript、ONNX 与 `student_config.json`；配置记录观测顺序/缩放、关节顺序、nominal pose、安全限位、PD 参数和固定标称延迟。成对评估对相同 clip 分别运行 Teacher 与 Student，输出篮球首次触地相对篮筐的水平落点和最高高度。
 
 Student 真机导出流程、phase/初始化契约、参考观测构造器及 READY 验证见 [部署说明](docs/student_deployment.md)。
+
+### 从 Teacher rollout 导出训练 motion
+
+```bash
+python scripts/rsl_rl/record_teacher_motion.py \
+  --checkpoint logs/rsl_rl/g1_shoot_teacher_v2/<run>/model_6000.pt \
+  --pre_hold 1.0 --post_hold 3.0 \
+  --export_dir outputs/teacher_motion --headless
+```
+
+使用 Isaac Lab 的 Python 环境运行。默认按源数据顺序为每个 clip 录制一次，
+可用 `--clip_ids 0 2` 指定片段。导出文件为 `<export_dir>/teacher_motion.pkl`，
+与训练源 pkl 一样通过 `joblib.load` 读取为 `list[dict]`，保留所有字段、dtype、
+关节及接触通道顺序。采样率为 100 Hz，包含初始帧与自动 reset 前的终止帧。
+`root_pos/root_rot/dof/obj_pos/obj_rot/contact` 取仿真实测值，位置减去环境原点，
+四元数为 WXYZ；`hoop_pos_w` 为实际篮圈中心，`release/push_available` 沿用当前参考阶段的语义标注。
+前后 hold 期间仍由 teacher 控制并录制，时长按控制步量化；关闭 RSI、随机 hold 和自适应速度。
+若 rollout 因摔倒等条件提前终止，会报错且不导出该批次。

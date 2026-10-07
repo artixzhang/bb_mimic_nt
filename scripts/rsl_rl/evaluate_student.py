@@ -52,7 +52,8 @@ def main(env_cfg, agent_cfg):
     student_state, exported = student_read_artifact(args.student_weights, args.student_config)
     with args.teacher_checkpoint.open("rb") as stream:
         teacher_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
-    if exported.get("teacher_sha256") not in (None, teacher_sha256):
+    expected_teacher = exported.get("teacher_sha256", exported.get("_provenance", {}).get("teacher_sha256"))
+    if expected_teacher not in (None, teacher_sha256):
         raise ValueError("The Student export was distilled from a different Teacher checkpoint.")
     student_apply_deployment_config(env_cfg, exported)
     student_apply_teacher_config(env_cfg, args.teacher_checkpoint.resolve())

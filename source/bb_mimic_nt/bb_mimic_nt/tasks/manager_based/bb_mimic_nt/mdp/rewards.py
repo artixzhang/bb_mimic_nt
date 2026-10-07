@@ -16,11 +16,11 @@ from isaaclab.utils import configclass
 from isaaclab.utils.math import quat_error_magnitude, quat_inv, quat_mul
 
 from bb_mimic_nt.core import (
+    action_accel_cost,
     clipped_regularization,
     gated_height_shortfall_cost,
     gated_top_level_reward,
     gaussian,
-    joint_jerk_cost,
     normalized_weighted_sum,
     rational_kernel,
 )
@@ -120,7 +120,7 @@ def object_direction_reward(actual: torch.Tensor, reference: torch.Tensor, sigma
     ref_norm = torch.linalg.vector_norm(reference, dim=-1)
     
     # 球处于静止阶段 (比如准备期 ref_speed < 0.2 m/s), 方向未定义, 直接给满分 1.0
-    is_moving = ref_norm > 0.2
+    is_moving = ref_norm > 0.05
     
     # cos(theta) = (v1 · v2) / (|v1| * |v2|)
     denom = (actual_norm * ref_norm).clamp_min(1e-6)
@@ -206,33 +206,26 @@ class UnifiedRewardCfg:
     foot_airborne_height_tolerance: float = 0.0
     foot_airborne_height_weight: float = 0.0
     root_airborne_height_tolerance: float = 0.0
-    root_airborne_height_weight: float = 1.2
+    root_airborne_height_weight: float = 1.0
     
-    action_magnitude_weight: float = 0.05
-    action_rate_weight: float = 0.20
-    target_residual_rate_weight: float = 0.05
-    torque_weight: float = 1.0e-5
+    action_magnitude_weight: float = 0.02
+    action_rate_weight: float = 0.8
+    torque_weight: float = 0.25
     limit_weight: float = 0.05
     joint_velocity_error_weight: float = 0.001
-    joint_jerk_weight: float = 1.0e-11
-    regularization_clip: float = 0.5
+    action_accel_weight: float = 0.6
+    regularization_clip: float = 0.8
     termination_penalty: float = 100.0
 
 
 def regularization_cost(
-    term: MotionReferenceCommand, settings: UnifiedRewardCfg, env, joint_jerk: torch.Tensor
+    term: MotionReferenceCommand, settings: UnifiedRewardCfg, env, action_accel: torch.Tensor
 ) -> dict[str, torch.Tensor]:
     robot = term.robot
     joint_ids = term.joint_ids
     action_term = env.action_manager.get_term("joint_pos")
     action_magnitude = torch.mean(action_term.raw_actions**2, dim=-1)
     action_rate = torch.mean((action_term.raw_actions - action_term.previous_raw_actions) ** 2, dim=-1)
-    # Measure the target residual after position clipping; away from the limits this equals action_rate.
-    current_residual = (action_term.desired_actions - action_term.reference_positions) / action_term.residual_scale
-    previous_residual = (
-        action_term.previous_desired_actions - action_term.previous_reference_positions
-    ) / action_term.residual_scale
-    target_residual_rate = torch.mean((current_residual - previous_residual) ** 2, dim=-1)
 
     torque = robot.data.applied_torque[:, joint_ids]
     effort_limit = robot.data.joint_effort_limits[:, joint_ids].clamp_min(1.0e-6)
@@ -252,31 +245,28 @@ def regularization_cost(
         (
             action_magnitude,
             action_rate,
-            target_residual_rate,
             torque_cost,
             limit_cost,
             joint_velocity_error,
-            joint_jerk,
+            action_accel,
         ),
         (
             settings.action_magnitude_weight,
             settings.action_rate_weight,
-            settings.target_residual_rate_weight,
             settings.torque_weight,
             settings.limit_weight,
             settings.joint_velocity_error_weight,
-            settings.joint_jerk_weight,
+            settings.action_accel_weight,
         ),
         settings.regularization_clip,
     )
     return {
         "reg/action_magnitude": action_magnitude,
         "reg/action_rate": action_rate,
-        "reg/target_residual_rate": target_residual_rate,
         "reg/torque": torque_cost,
         "reg/limit": limit_cost,
         "reg/joint_velocity_error": joint_velocity_error,
-        "reg/joint_jerk": joint_jerk,
+        "reg/action_accel": action_accel,
         "reg/total": weighted,
     }
 
@@ -287,27 +277,24 @@ class UnifiedMimicReward(ManagerTermBase):
     def __init__(self, cfg, env):
         super().__init__(cfg, env)
         self._episode_sums: dict[str, torch.Tensor] = {}
-        self._previous_joint_velocity: torch.Tensor | None = None
-        self._previous_joint_acceleration: torch.Tensor | None = None
-        self._joint_history_length = torch.zeros(self.num_envs, dtype=torch.uint8, device=self.device)
+        self._previous_policy_action: torch.Tensor | None = None
+        self._previous_previous_policy_action: torch.Tensor | None = None
+        self._action_history_length = torch.zeros(self.num_envs, dtype=torch.uint8, device=self.device)
 
-    def _joint_jerk(self, velocity: torch.Tensor) -> torch.Tensor:
-        if self._previous_joint_velocity is None:
+    def _action_accel(self, action: torch.Tensor) -> torch.Tensor:
+        if self._previous_policy_action is None:
             with torch.inference_mode(False):
-                self._previous_joint_velocity = torch.zeros_like(velocity)
-                self._previous_joint_acceleration = torch.zeros_like(velocity)
-        cost, acceleration = joint_jerk_cost(
-            velocity,
-            self._previous_joint_velocity,
-            self._previous_joint_acceleration,
-            self._joint_history_length,
-            self._env.step_dt,
+                self._previous_policy_action = torch.zeros_like(action)
+                self._previous_previous_policy_action = torch.zeros_like(action)
+        cost = action_accel_cost(
+            action,
+            self._previous_policy_action,
+            self._previous_previous_policy_action,
+            self._action_history_length,
         )
-        self._previous_joint_velocity.copy_(velocity)
-        self._previous_joint_acceleration.copy_(
-            torch.where(self._joint_history_length[:, None] > 0, acceleration, 0.0)
-        )
-        self._joint_history_length.add_(1).clamp_(max=2)
+        self._previous_previous_policy_action.copy_(self._previous_policy_action)
+        self._previous_policy_action.copy_(action)
+        self._action_history_length.add_(1).clamp_(max=2)
         return cost
 
     def _record(self, values: dict[str, torch.Tensor]) -> None:
@@ -323,7 +310,7 @@ class UnifiedMimicReward(ManagerTermBase):
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
         if env_ids is None:
             env_ids = slice(None)
-        self._joint_history_length[env_ids] = 0
+        self._action_history_length[env_ids] = 0
         duration = (
             self._env.episode_length_buf[env_ids].float() * self._env.step_dt
         ).clamp_min(self._env.step_dt)
@@ -496,8 +483,9 @@ class UnifiedMimicReward(ManagerTermBase):
             settings.global_weights,
             relative_gate=relative_gate,
         )
-        joint_jerk = self._joint_jerk(robot.data.joint_vel[:, term.joint_ids])
-        regularization = regularization_cost(term, settings, env, joint_jerk)
+        # ActionManager retains the direct policy output, before tanh, scaling, or delay.
+        action_accel = self._action_accel(env.action_manager.action)
+        regularization = regularization_cost(term, settings, env, action_accel)
         termination = env.termination_manager.terminated.float() * settings.termination_penalty
         total = torch.nan_to_num(
             mimic

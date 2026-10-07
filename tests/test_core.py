@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from bb_mimic_nt.core import (
+    action_accel_cost,
     advance_reference_frame,
     apply_joint_residual_caps,
     apply_ballistic_speed_lock,
@@ -19,7 +20,6 @@ from bb_mimic_nt.core import (
     gated_height_shortfall_cost,
     gated_top_level_reward,
     interpolate_motion,
-    joint_jerk_cost,
     normalized_weighted_sum,
     rational_kernel,
     reference_residual_target,
@@ -58,21 +58,19 @@ def test_exact_joint_residual_caps_preserve_unspecified_joints() -> None:
         apply_joint_residual_caps(scale, ("first", "second", "third"), {"first": 0.05}, 0.1)
 
 
-def test_joint_jerk_penalizes_velocity_reversal_after_two_samples() -> None:
-    dt = 0.01
-    previous_velocity = torch.tensor([[1.0], [1.0]])
-    previous_acceleration = torch.tensor([[100.0], [100.0]])
-    velocity = torch.tensor([[2.0], [0.0]])
-    cost, acceleration = joint_jerk_cost(
-        velocity, previous_velocity, previous_acceleration, torch.tensor([2, 2]), dt
+def test_action_accel_penalizes_reversal_after_two_samples() -> None:
+    previous_previous_action = torch.tensor([[0.0, 0.0], [0.0, 0.0], [3.0, -3.0]])
+    previous_action = torch.tensor([[1.0, -1.0], [1.0, -1.0], [3.0, -3.0]])
+    action = torch.tensor([[2.0, -2.0], [0.0, -1.0], [3.0, -3.0]])
+    cost = action_accel_cost(
+        action, previous_action, previous_previous_action, torch.tensor([2, 2, 2])
     )
-    assert torch.allclose(acceleration, torch.tensor([[100.0], [-100.0]]))
-    assert cost[0] == pytest.approx(0.0)
-    assert cost[1] == pytest.approx(4.0e8)
-    startup_cost, _ = joint_jerk_cost(
-        velocity, previous_velocity, previous_acceleration, torch.tensor([1, 0]), dt
+    # Linear and constant policy outputs have zero acceleration; average across action dimensions.
+    assert cost.tolist() == pytest.approx([0.0, 2.5, 0.0])
+    startup_cost = action_accel_cost(
+        action, previous_action, previous_previous_action, torch.tensor([0, 1, 0])
     )
-    assert torch.equal(startup_cost, torch.zeros(2))
+    assert torch.equal(startup_cost, torch.zeros(3))
 
 
 def test_rsi_schedule_uses_central_training_length() -> None:
@@ -172,8 +170,29 @@ def test_reward_normalization_gating_and_regularization_cap() -> None:
         (0.01, 0.005, 0.10, 0.005),
         0.20,
     )
-    assert cost.item() == pytest.approx(0.20)
-    assert torch.allclose(active - cost - 5.0, torch.full((3,), -4.2))
+    expected_cost = 0.20 * math.tanh(1.11 / 0.20)
+    assert cost.item() == pytest.approx(expected_cost)
+    assert torch.allclose(active - cost - 5.0, torch.full((3,), -4.0 - expected_cost))
+
+
+def test_regularization_soft_cap_preserves_gradient_above_limit() -> None:
+    maximum = 0.8
+    raw = torch.tensor([0.0, 1.0e-5, 0.8, 1.6, 100.0], dtype=torch.float64, requires_grad=True)
+    cost = clipped_regularization((raw,), (1.0,), maximum)
+    assert cost[0].item() == 0.0
+    assert cost[1].item() == pytest.approx(raw[1].item())
+    assert torch.all(cost >= 0.0)
+    assert torch.all(cost <= maximum)
+    assert torch.all(cost[1:] > cost[:-1])
+    cost.sum().backward()
+    assert raw.grad[0].item() == pytest.approx(1.0)
+    assert torch.all(raw.grad[2:4] > 0.0)
+
+
+@pytest.mark.parametrize("maximum", [0.0, -0.8])
+def test_regularization_requires_positive_limit(maximum: float) -> None:
+    with pytest.raises(ValueError, match="maximum must be positive"):
+        clipped_regularization((torch.ones(1),), (1.0,), maximum)
 
 
 def test_gated_height_shortfall_cost_is_one_sided_and_per_foot() -> None:

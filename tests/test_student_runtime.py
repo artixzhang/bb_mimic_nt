@@ -28,7 +28,7 @@ def test_student_deployment_and_torchscript_roundtrip(tmp_path, history, stale_s
                     action_semantics='joint_position_radians_minus_nominal_pose',
                     default_action_delay_steps=0, default_observation_delay_steps=1,
                     observation_settings=dict(scales=dict(phase=1., gravity=1., angular_velocity=.25,
-                        joint_position=1., joint_velocity=.05, applied_action=1., hoop_position=.25)))
+                        joint_position=1., joint_velocity=.05, applied_action=1., hoop_position=.25, hoop_theta=2.)))
     from bb_mimic_nt.student_deployment import build_deployment_contract
     batch = dict(metadata=dict(dof_names=metadata['joint_names'], fps=100.), lengths=torch.tensor([166]),
                  dof_pos=torch.zeros(1, 166, 29), root_pos=torch.zeros(1, 166, 3),
@@ -37,6 +37,8 @@ def test_student_deployment_and_torchscript_roundtrip(tmp_path, history, stale_s
     metadata['history_length'] = history
     metadata['deployment_contract'] = build_deployment_contract(
         metadata, batch, SimpleNamespace(pre_hold_s=0., post_hold_s=1.))
+    metadata['teacher_sha256'] = 'archived-teacher-hash'
+    metadata['export_source'] = dict(checkpoint='model_42.pt', iteration=42)
     policy = StudentPolicy([16, 8], 'elu', metadata['observation_dim']).eval()
     if stale_source:
         import inspect, types
@@ -47,7 +49,9 @@ def test_student_deployment_and_torchscript_roundtrip(tmp_path, history, stale_s
         monkeypatch.setattr(StudentPolicy, 'forward', replacement)
         assert 'super().__init__()' in inspect.getsource(StudentPolicy.forward)
     (tmp_path / "deployment_config.json").write_text("obsolete generated duplicate")
-    student_export(policy, tmp_path, metadata)
+    source = tmp_path / 'model_42.pt'
+    torch.save(dict(student=policy.student.state_dict(), iteration=42), source)
+    student_export(policy, tmp_path, metadata, source_path=source, source_iteration=42)
     loaded, saved = student_load_policy(tmp_path / 'student_weights.pt', None, 'cpu')
     scripted = torch.jit.load(str(tmp_path / 'student_policy.pt'))
     inputs = torch.randn(4, metadata['observation_dim'])
@@ -58,9 +62,42 @@ def test_student_deployment_and_torchscript_roundtrip(tmp_path, history, stale_s
     manifest = json.loads((tmp_path / 'manifest.json').read_text())
     for name, digest in manifest['artifacts_sha256'].items():
         assert hashlib.sha256((tmp_path / name).read_bytes()).hexdigest() == digest
+    assert manifest['provenance']['teacher_sha256'] == 'archived-teacher-hash'
+    assert saved['_provenance'] == manifest['provenance']
     deployment = json.loads((tmp_path / 'student_config.json').read_text())
+    assert deployment['export_source'] == dict(
+        path=str(source.resolve()), file=source.name, size_bytes=source.stat().st_size,
+        sha256=hashlib.sha256(source.read_bytes()).hexdigest(), iteration=42)
+    assert manifest['provenance']['export_source'] == deployment['export_source']
     assert not (tmp_path / 'deployment_config.json').exists()
-    assert deployment['deployment_contract']['phase']['motion_profiles'][0]['phase_increment_per_tick'] == pytest.approx(1 / 165)
+    assert deployment['format'] == 'bb_mimic_nt_student_v2'
+    profile = deployment['phase']['motion_profiles'][0]
+    assert profile['reference_fps'] / deployment['policy_hz'] / (profile['frame_count'] - 1) == pytest.approx(1 / 165)
+    assert not {'deployment_contract', 'observation_settings', 'training_observation_settings',
+                'action_adapter', 'teacher_checkpoint'} & deployment.keys()
+    cfg = SimpleNamespace(student_observation=SimpleNamespace(scales=SimpleNamespace()),
+                          dr=SimpleNamespace(), actions=SimpleNamespace(joint_pos=SimpleNamespace()),
+                          commands=SimpleNamespace(motion=SimpleNamespace()))
+    student_apply_deployment_config(cfg, saved)
+    assert cfg.student_observation.history_length == history
+    assert cfg.student_observation.scales.joint_velocity == .05
+    assert cfg.student_observation.scales.hoop_position == .25
+    assert cfg.student_observation.scales.hoop_theta == 2.
+    assert cfg.student_observation.delay_min_steps == cfg.student_observation.delay_max_steps == 1
+    assert cfg.actions.joint_pos.safe_lower_joint_position == [-2.] * 29
+    assert cfg.commands.motion.post_hold_s == 1.
+    # A v2 bundle can be exported again without the archived Teacher/cache.
+    student_export(loaded, tmp_path / 'again', saved)
+    assert json.loads((tmp_path / 'again/student_config.json').read_text()) == deployment
+    assert json.loads((tmp_path / 'again/manifest.json').read_text())['provenance'] == manifest['provenance']
+
+    # An explicit weight re-export records the actual input, not an inherited checkpoint.
+    weights = tmp_path / 'student_weights.pt'
+    student_export(loaded, tmp_path / 'from_weights', saved, source_path=weights)
+    reexported = json.loads((tmp_path / 'from_weights/student_config.json').read_text())
+    assert reexported['export_source'] == dict(
+        path=str(weights.resolve()), file=weights.name, size_bytes=weights.stat().st_size,
+        sha256=hashlib.sha256(weights.read_bytes()).hexdigest())
 
     import onnx
     onnx.checker.check_model(str(tmp_path / 'student_policy.onnx'))

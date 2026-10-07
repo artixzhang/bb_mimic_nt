@@ -151,9 +151,10 @@ class CommandsCfg:
         cache_path=str(MOTION_CACHE),
         urdf_path=str(ROBOT_URDF),
         rsi_decay_steps=RSI_DECAY_STEPS,
-        pre_hold_s=5.0,
-        post_hold_s=5.0,
-        hold_sampling_weights=(0.60, 0.60),
+        pre_hold_s=10.0,
+        post_hold_s=10.0,
+        # hold 采样 分别占动作的训练样本占比
+        hold_sampling_weights=(0.50, 0.50),
         hoop_center_offset=BB_HOOP_CENTER_OFFSET,
         hoop_root_quat=BB_HOOP_ROOT_ROTATION,
     )
@@ -185,7 +186,7 @@ class ObservationsCfg:
         tracked_link_position = ObsTerm(func=mdp.link_pos_b)
         ball_position = ObsTerm(func=mdp.object_pos_b)
         ball_linear_velocity = ObsTerm(func=mdp.object_lin_vel_b)
-        hoop_position = ObsTerm(func=mdp.hoop_pos_b)
+        hoop_position = ObsTerm(func=mdp.hoop_pos_cyl)
         previous_action = ObsTerm(func=mdp.previous_action)
         pd_error = ObsTerm(func=mdp.pd_error)
 

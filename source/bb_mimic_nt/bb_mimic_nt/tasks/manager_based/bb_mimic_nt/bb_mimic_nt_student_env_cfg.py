@@ -55,7 +55,8 @@ class StudentObservationScalesCfg:
     joint_position: float = 1.0
     joint_velocity: float = 0.05
     applied_action: float = 1.0
-    hoop_position: float = 0.25
+    hoop_position: float = 0.25  # Radius and height.
+    hoop_theta: float = 2.0  # Absolute scale for theta in radians.
 
 
 @configclass

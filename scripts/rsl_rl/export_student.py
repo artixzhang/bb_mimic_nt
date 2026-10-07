@@ -49,6 +49,7 @@ def main():
     import torch
     from bb_mimic_nt.student_runtime import student_export, student_load_policy, student_policy_from_state
 
+    source_iteration = None
     if args.student_weights:
         selected = args.student_weights
         policy, metadata = student_load_policy(selected, args.student_config, 'cpu')
@@ -59,11 +60,10 @@ def main():
         if payload.get('format') != 'bb_mimic_nt_student_dagger_v1' or 'metadata' not in payload:
             raise ValueError(f'Checkpoint is not an exportable Student DAgger checkpoint: {selected}')
         metadata = dict(payload['metadata'])
-        metadata['export_source'] = dict(run=selected.parent.name, checkpoint=selected.name,
-                                        iteration=payload['iteration'])
+        source_iteration = payload['iteration']
         policy = student_policy_from_state(payload['student'], metadata, 'cpu')
     destination = export_destination(selected, args.output)
-    student_export(policy, destination, metadata)
+    student_export(policy, destination, metadata, source_path=selected, source_iteration=source_iteration)
     print(f'Student artifacts: {destination.resolve()}')
 
 

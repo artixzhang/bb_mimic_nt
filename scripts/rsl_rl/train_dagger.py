@@ -130,6 +130,8 @@ def main(env_cfg, agent_cfg):
             json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8"
         )
         start_iteration = 0
+        export_checkpoint = None
+        export_iteration = None
         if args.resume_checkpoint:
             state = torch.load(args.resume_checkpoint, map_location=base.device, weights_only=False)
             if state.get("format") != "bb_mimic_nt_student_dagger_v1":
@@ -142,6 +144,8 @@ def main(env_cfg, agent_cfg):
             if state.get("replay") is not None:
                 replay.load_state_dict(state["replay"])
             start_iteration = int(state["iteration"])
+            export_checkpoint = args.resume_checkpoint
+            export_iteration = start_iteration
             base.dr_context.iteration_offset = start_iteration
             base.reset()
             observations = env.get_observations()
@@ -255,13 +259,16 @@ def main(env_cfg, agent_cfg):
                     "teacher_sha256": metadata["teacher_sha256"],
                     "metadata": metadata,
                 }
-                torch.save(payload, run / f"model_{iteration + 1}.pt")
+                export_checkpoint = run / f"model_{iteration + 1}.pt"
+                torch.save(payload, export_checkpoint)
+                export_iteration = iteration + 1
 
         policy = StudentPolicy(
             agent_cfg.policy.student_hidden_dims, agent_cfg.policy.activation, metadata["observation_dim"]
         ).to(base.device)
         policy.student.load_state_dict(model.student.state_dict())
-        student_export(policy.eval(), run / "exported", metadata)
+        student_export(policy.eval(), run / "exported", metadata,
+                       source_path=export_checkpoint, source_iteration=export_iteration)
         print(f"Student artifacts: {run / 'exported'}")
     finally:
         writer.close()

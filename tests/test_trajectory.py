@@ -239,3 +239,26 @@ def test_cache_hash_invalidation(tmp_path: Path) -> None:
     payload["metadata"]["schema_version"] = CACHE_SCHEMA_VERSION + 1
     torch.save(payload, cache_path)
     assert not cache_is_current(cache_path, source, urdf)
+
+
+def test_cylindrical_hoop_validation_and_cache_roundtrip(tmp_path):
+    clip = copy.deepcopy(joblib.load(SOURCE)[0])
+    clip['hoop_pos_cyl'] = np.array([4., -.7, 3.05], dtype=np.float32)
+    source = tmp_path / 'motion.pkl'
+    joblib.dump([clip], source)
+    cache_path = tmp_path / 'motion.pt'
+    preprocess_motion_batch(source, URDF, cache_path)
+    cache = load_motion_batch(cache_path)
+    torch.testing.assert_close(cache['hoop_pos_cyl'][0],
+                               torch.from_numpy(clip['hoop_pos_cyl']).expand(len(clip['root_pos']), 3))
+    torch.testing.assert_close(cache['hoop_pos'][0, 0], torch.as_tensor(clip['hoop_pos_w'], dtype=torch.float32))
+    assert cache_is_current(cache_path, source, URDF)
+    clip['hoop_pos_cyl'] = np.zeros(2)
+    with pytest.raises(ValueError, match='hoop_pos_cyl.*shape'):
+        validate_motion_batch([clip])
+    clip['hoop_pos_cyl'] = np.array([4., np.nan, 3.05])
+    with pytest.raises(ValueError, match='hoop_pos_cyl.*NaN'):
+        validate_motion_batch([clip])
+    del clip['hoop_pos_cyl']
+    with pytest.raises(ValueError, match='missing fields.*hoop_pos_cyl'):
+        validate_motion_batch([clip])

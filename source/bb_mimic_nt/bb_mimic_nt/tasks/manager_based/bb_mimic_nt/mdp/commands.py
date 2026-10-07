@@ -271,6 +271,7 @@ class MotionReferenceCommand(CommandTerm):
             "object_ang_vel",
             "contact",
             "hoop_pos",
+            "hoop_pos_cyl",
             "link_pos_w",
             "link_quat_w",
             "link_pos_b",

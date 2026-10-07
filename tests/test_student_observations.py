@@ -40,13 +40,14 @@ def make_sensor(nominal=1, maximum=3, count=2, history=5):
                                enabled=True, start_fraction=0., end_fraction=.3, full_strength=True,
                                scales=SimpleNamespace(phase=1., gravity=1., angular_velocity=1.,
                                                       joint_position=1., joint_velocity=1.,
-                                                      applied_action=1., hoop_position=1.))
+                                                      applied_action=1., hoop_position=1., hoop_theta=1.))
     data = SimpleNamespace(projected_gravity_b=torch.zeros(count, 3),
                            root_link_quat_w=torch.tensor([1., 0., 0., 0.]).repeat(count, 1),
                            root_link_ang_vel_w=torch.zeros(count, 3), root_link_pos_w=torch.zeros(count, 3),
                            joint_pos=torch.zeros(count, 29), joint_vel=torch.zeros(count, 29))
     motion = SimpleNamespace(robot=SimpleNamespace(data=data), joint_ids=list(range(29)),
-                             normalized_phase=torch.zeros(count), hoop_center_pos_w=lambda: torch.zeros(count, 3))
+                             normalized_phase=torch.zeros(count),
+                             reference={"hoop_pos_cyl": torch.zeros(count, 3)})
     action = SimpleNamespace(nominal=torch.zeros(count, 29), actual_action_offset=torch.zeros(count, 29))
     env = SimpleNamespace(num_envs=count, device='cpu', common_step_counter=0,
                           cfg=SimpleNamespace(student_observation=settings,
@@ -108,3 +109,28 @@ def test_sensor_curriculum_starts_clean_at_nominal_delay_and_reaches_full_range(
 def test_legacy_three_frame_builder_dimension():
     sensor, env, _, _ = make_sensor(nominal=2, maximum=4, history=3)
     assert sensor(env).shape == (2, 283)
+
+
+def test_cylindrical_hoop_input_is_frozen_and_reset_per_environment():
+    sensor, env, data, _ = make_sensor()
+    motion = env.command_manager.get_term('motion')
+    hoop = torch.tensor([[4., -.7, 3.05], [5., 1.2, 2.8]])
+    motion.reference['hoop_pos_cyl'][:] = hoop
+    data.root_link_pos_w[:] = 100.
+    torch.testing.assert_close(sensor(env)[:, -3:], hoop)
+    motion.reference['hoop_pos_cyl'] += 1.
+    env.common_step_counter += 1
+    torch.testing.assert_close(sensor(env)[:, -3:], hoop)
+    sensor.reset([0])
+    expected = hoop.clone()
+    expected[0] += 1.
+    torch.testing.assert_close(sensor(env)[:, -3:], expected)
+
+
+def test_teacher_uses_trajectory_cylindrical_hoop_directly():
+    source = ast.parse((MDP / 'observations.py').read_text())
+    node = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == 'hoop_pos_cyl')
+    hoop = torch.tensor([[4., -.7, 3.05]])
+    namespace = dict(torch=torch, motion_command=lambda env: SimpleNamespace(reference={'hoop_pos_cyl': hoop}))
+    exec(compile(ast.Module(body=[node], type_ignores=[]), str(MDP / 'observations.py'), 'exec'), namespace)
+    torch.testing.assert_close(namespace['hoop_pos_cyl'](None), hoop)

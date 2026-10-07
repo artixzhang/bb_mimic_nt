@@ -1,37 +1,80 @@
-# Student 导出与真机接入
-
-每次自动训练导出和 `scripts/rsl_rl/export_student.py` 都生成同一套部署包。部署约定由训练环境中的实际 motion cache 和配置生成，不要求手工维护 frame 数、初始姿态或 JSON。旧 checkpoint 缺少这些信息时，导出器从它保存的 Teacher 配置和 motion cache 恢复；依赖缺失时明确报错，不猜动作时长。恢复信息记录在 provenance 中；旧模型未保存 motion 哈希，因此部署前仍需确认该 cache 确实是训练使用的版本。
+# Student 导出与部署接口
 
 ```bash
 PYTHONPATH=source/bb_mimic_nt python scripts/rsl_rl/export_student.py
 ```
 
-不传参数时，自动选择最新时间戳 run 中编号最大的非空 model_N.pt；没有 checkpoint 的新 run 会跳过。输出自动为 outputs/student_<run-time>。显式 --checkpoint、--output 仍可覆盖；训练未结束时选中的是中间 checkpoint，实际选择会打印并写入 export_source。验证 manifest 后再将整包交给部署程序。历史导出的模型仍兼容；重新导出会补全部署契约。尚在运行的训练不会重新加载 Python 源码，结束后可用上述命令重新导出。
+默认选择最新有非空 checkpoint 的时间戳 run，再选择编号最大的 `model_N.pt`，导出到 `outputs/student_<run-time>`。可用 `--checkpoint`、`--student-weights`、`--student-config`、`--output` 覆盖。自动训练导出与独立导出使用同一逻辑。训练进程不会重新加载已编辑的 Python 源码；正在运行的旧进程结束后可用上述命令重新导出。
 
 ## 包内文件
 
 | 文件 | 用途 |
 | --- | --- |
-| student_policy.pt / student_policy.onnx | TorchScript / ONNX 推理模型 |
-| student_weights.pt | PyTorch 权重 |
-| student_config.json | 唯一配置：模型、观测、初始化与时序契约，同时兼容仿真播放 |
-| verification_vectors.npz | 输入观测与预期未裁剪动作输出，用于核对部署推理 |
-| manifest.json | 文件 SHA256 和实际通过的验证项目 |
+| student_policy.pt / student_policy.onnx | 完整推理网络，输入 `[batch, observation_dim]`，输出 `[batch, action_dim]` |
+| student_weights.pt | 原始 Student 权重；网络结构由配置的 hidden dims 和 activation 重建 |
+| student_config.json | 唯一运行配置：关节、观测、动作、phase、初始化，以及 export_source 源文件信息 |
+| verification_vectors.npz | 输入观测及预期未经裁剪的网络输出 |
+| manifest.json | 文件 SHA256、导出来源、Teacher/motion/URDF 追溯及通过的验证项目 |
 
-配置只保留一份；deployment_contract 是部署时序与初始化规范。training_observation_settings、Teacher 来源和 action_adapter 用于追溯、旧模型重新导出及仿真播放，真机观测构造器不会使用这些训练字段。推理仅使用显式 scales，不更新 running normalization。真机参考实现和仿真共用 student_config.json。
+新导出使用 `format=bb_mimic_nt_student_v2`。只保留这一个配置版本标记，没有嵌套 schema。旧 v1 配置和训练 checkpoint 仍可读取、播放并重新导出。训练课程、噪声、Teacher residual 参数保留在训练 checkpoint/params 中，不进入部署 JSON。Teacher 路径/哈希和 motion/URDF 哈希保留在 manifest.provenance；整包一起交付。
 
-导出自动检查 ONNX 结构，以及 TorchScript、ONNX ReferenceEvaluator 与 PyTorch 的数值一致性。安装 onnxruntime 时还会检查 ONNX 输出；未安装时 manifest 明确标为未验证。部署程序应核对文件哈希，并在实际推理后端运行 verification_vectors，不能把这些离线检查视为真机稳定性验证。
+`student_config.json` 的 `export_source` 记录本次导出输入文件的 `path`（导出时的绝对路径）、`file`（文件名）、`size_bytes` 和 `sha256`；从 checkpoint 导出时还记录 `iteration`。训练结束自动导出使用最后保存的 checkpoint，`--student-weights` 重导出使用实际输入的权重文件，不沿用旧 checkpoint 的哈希。相同信息同步写入 `manifest.provenance.export_source`。路径仅供追溯，部署时无需访问训练机器或复制 checkpoint；导出产物本身的 SHA256 仍由 `manifest.artifacts_sha256` 记录。底层 Python API 未传入源文件时只保留已有来源信息，不推测缺失的路径或哈希。
 
-## 控制与观测顺序
+旧 checkpoint 没有 motion profile 时，导出器从归档 Teacher 配置及 motion cache 恢复；依赖缺失时报错。恢复信息进入 manifest；旧模型未保存 motion 哈希时，仍需确认恢复的 cache 是训练版本。
 
-参考实现位于 `bb_mimic_nt.student_deployment`，不依赖 Isaac Sim：`StudentPhaseClock` 管理 phase，`StudentObservationState` 构造观测、初始化历史并转换动作。
+## JSON 字段与单位
 
-1. 按 joint_names 映射电机顺序、方向及零位，校准 IMU 到 pelvis/root_link 的旋转。关节位置/速度分别用 rad 和 rad/s，gyro 用 pelvis 坐标系 rad/s；重力输入为 `R.T @ [0,0,-1]` 单位向量，不是 9.81 m/s² 加速度。
-2. 用硬件启动控制器进入所选 clip 的 initial_joint_position_rad，球也应处于训练初始条件。nominal_joint_position 只是观测/输出的坐标原点，不是投篮准备姿态。
-3. 读取真实首帧传感器和实际生效的 PD target。用首帧填满所有 sensor history；用 `(实际PD target - nominal)` 填满 action history，不全填零。训练中初始 PD target 是安全限位内的第一帧 reference。
-4. 捕获篮筐中心相对 pelvis 的位置，并转换到 reset 时的 pelvis 坐标系；随后冻结，READY -> ACTIVE 时也不重新捕获。
-5. 每个策略 tick 先采样、构造当前 phase 的输入、推理，再计算 `target = clip(nominal + output, lower, upper)`、提交目标，最后调用 clock.after_policy_tick()。不要再加 tanh、Teacher residual scale 或 reference pose。
-6. 下一 tick 的 action history 填实际生效、已经过 clipping/执行延迟的 PD target，而不是最新网络输出或实测关节角。传感历史应用观测延迟，phase/action history 不应用该传感延迟。
+顶层 `policy_hz` 是策略频率；所有 delay_steps 的单位都是策略 tick。周期由 `1 / policy_hz` 得到。`observation_dim`、`action_dim` 是单个样本的维数；`history_length` 是每种历史观测的帧数。
+
+所有 29 元素关节数组都严格遵循 `joint_names` 的顺序：
+
+- `nominal_joint_position`：offset 的坐标原点，rad；不是投篮准备姿态。
+- `safe_lower_joint_position` / `safe_upper_joint_position`：最终 position target 的安全边界，rad，已包含训练使用的位置 margin。
+- `pd_stiffness`：Kp，N·m/rad；`pd_damping`：Kd，N·m·s/rad。仿真使用 implicit position actuator，硬件须匹配位置控制与 gain 约定。
+- `student_hidden_dims` / `activation`：用于从 student_weights.pt 重建网络；TorchScript/ONNX 内已包含结构。
+
+`observation.fields` 是输入的唯一布局定义。每项含 `name`、`start`、`stop`、`unit`、`scale`、`source`。`[start:stop]` 为零基、stop 不含在内的切片；unit 是乘 scale **之前**的物理单位，实际输入为 `raw_value * scale`。配置验证器会检查字段顺序、连续切片、单位、维数和有限 scale。
+
+| 字段 | 单帧维数 | 原始值 |
+| --- | --- | --- |
+| phase | 1 | frame / (frame_count - 1)，无量纲 |
+| projected_gravity_history | 3 | pelvis/root_link 坐标系的重力方向，xyz，无量纲；`R.T @ [0,0,-1]` |
+| pelvis_angular_velocity_history | 3 | pelvis/root_link 坐标系 gyro，xyz，rad/s |
+| joint_position_offset_history | 29 | 实测 q − nominal，rad |
+| joint_velocity_history | 29 | 实测 qdot，rad/s |
+| applied_action_offset_history | 29 | 已实际生效的 PD target − nominal，rad |
+| hoop_pos_cyl | 3 | 轨迹中的篮筐柱坐标 [r, theta, z]，单位 [m, rad, m]；reset 时读取，随后冻结 |
+
+输入采用 field-major：先拼完某一种 history 的所有帧，再拼下一种 history。每种 history 为 oldest-to-newest，每帧内部是 xyz 或 joint_names 顺序。history_length=5 时维数为 469。只有 sensor histories（gravity/gyro/q/qdot）应用 `observation.sensor_delay_steps`；phase 和 action history 不额外应用传感器延迟。action history 中的 target 本身已经经过 action delay。
+
+篮筐观测按 `[r_scale, theta_scale, z_scale]` 分量缩放：训练配置 `student_observation.scales.hoop_position=0.25` 用于 r、z，`student_observation.scales.hoop_theta=2.0` 单独用于弧度制 theta（不是额外乘数）。导出配置的 `hoop_pos_cyl` 字段 `scale` 保存为 `[0.25, 2.0, 0.25]`，部署端逐分量相乘。
+
+没有 running normalization、输入 clip 或部署人工噪声。机器人 IMU 需转换到 pelvis/root_link 坐标系；重力输入是方向，不能直接输入 9.81 m/s² 加速度。
+
+## Action 与历史初始化
+
+Student 网络直接输出 29 维 nominal-relative position offset，单位 rad。没有输出 tanh、额外 scale、Teacher reference 相加或 smoothing。执行转换在网络外：
+
+```python
+target = clip(nominal_joint_position + network_output,
+              safe_lower_joint_position, safe_upper_joint_position)
+```
+
+之后按照 `action.delay_steps` 处理总执行延迟。position clip 不根据 effort/velocity limit 计算；这些限制由执行器单独处理。下一 tick 的 action history 填实际已生效的 PD target，不填最新网络预测或实测关节角。延迟队列在启动时应填实际初始 PD target。
+
+初始化时由硬件启动控制器进入所选 motion profile 的姿态和持球条件。名义初始 PD target 可由 `clip(initial_joint_position_rad, lower, upper)` 得到，无需另存重复的 target 或 offset 数组。
+
+随后读取真实首帧 gravity/gyro/q/qdot 和实际初始 PD target；传感器历史及其 delay padding 全部重复这一首帧样本，action history 全部重复 `实际初始target - nominal`。首帧 qdot 也使用实测值，不统一填零。训练 reset 的 q/qdot 可以带扰动，测量 q 与 PD target 不要求相同。
+
+直接提供与训练轨迹一致的 `hoop_pos_cyl = [r, theta, z]`（单位 [m, rad, m]），不进行 pelvis 坐标变换；reset 时读取一次，READY -> ACTIVE 不重新读取。
+
+## Phase 和运行顺序
+
+`phase.motion_profiles` 包含 clip_id、frame_count、reference_fps 和初始关节/root/ball 条件；root/ball 位置以训练场景原点为参考，root quaternion 使用 WXYZ。硬件启动坐标系须与该 profile 对齐。动作时长为 `(frame_count - 1) / reference_fps`，每 tick phase 增量为 `reference_fps / policy_hz / (frame_count - 1)`，均不重复保存。
+
+`phase.pre_hold_s` / `post_hold_s` 是训练配置的完整 hold 时长，仿真播放采用这些时长；训练是否逐 episode 采样 hold 由训练归档记录。部署参考 clock 在 READY 保持 phase=0，触发后进入 ACTIVE，不自动倒计时触发。准备控制的稳定性需要针对相应模型和 hold 时长实际评估；不从配置时长推断验证已通过。
+
+每个策略 tick 先采样、构造当前 phase 的观测、推理、提交 target，最后推进 phase。ACTIVE 到终帧后保持 phase=1，经过 post_hold_s 后交给硬件控制器。
 
 ```python
 import json
@@ -40,43 +83,28 @@ from bb_mimic_nt.student_deployment import StudentObservationState, StudentPhase
 
 cfg = json.load(open('student_config.json'))
 model = torch.jit.load('student_policy.pt').eval()
-profile = cfg['deployment_contract']['phase']['motion_profiles'][0]
-clock = StudentPhaseClock(profile, cfg['policy_hz'],
-                          cfg['deployment_contract']['phase']['trained_post_hold_s'])
+profile = cfg['phase']['motion_profiles'][0]
+clock = StudentPhaseClock(profile, cfg['policy_hz'], cfg['phase']['post_hold_s'])
 state = StudentObservationState(cfg)
-# adapter 提供校准后的 gravity/gyro/q/qdot、真实 applied_pd_target、initial_hoop_b。
-state.reset(gravity, gyro, q, qdot, applied_pd_target, initial_hoop_b)
-# 每一 tick:
+state.reset(gravity, gyro, q, qdot, applied_pd_target, hoop_pos_cyl)
+# 每一 tick，adapter 提供校准后的传感器和实际已生效的命令：
 obs = state.observe(tick, clock.phase, gravity, gyro, q, qdot, applied_pd_target)
 with torch.inference_mode():
     target = state.action_target(model(obs))
-# 硬件 adapter 提交 target；记录/读取真实生效命令。
+# 硬件 adapter 提交 target，并记录/读取实际生效命令。
 clock.after_policy_tick()
-# 收到投篮触发时调用 clock.trigger()，不要 state.reset()。
+# 投篮触发时 clock.trigger()；不再次 state.reset()。
 ```
 
-硬件已经提供的传感/执行延迟不要重复人工施加。参考 builder 假设接收无延迟原始采样；有实际传感延迟时，通过 sensor_delay_steps 显式选择需要补充的延迟，使总延迟匹配训练分布。部署时须测量延迟、确认 PD gain/torque conventions，并接入 watchdog、fallback、急停与启动控制；这部分取决于实际硬件接口，本仓库不会启用电机。
+参考 builder 假设接收无延迟原始采样；若硬件采样已有延迟，通过 `sensor_delay_steps` 参数选择需要补充的延迟，使总延迟匹配配置。action.delay_steps 同样是总延迟假设，硬件已有的延迟不要重复施加。joint index/sign/zero、IMU 安装旋转、实际命令延迟及 motor limits 由硬件 adapter 标定；启动、watchdog、fallback 和急停属于硬件控制器。
 
-## phase 与准备控制
+## 验收
 
-每个 clip 自动导出 frame_count、reference_fps 和步长。当前 166 帧、100 Hz reference/100 Hz policy 时，ACTIVE 每 tick 增加 `1/165`，165 tick 后达到 1；POST_HOLD 保持 1，时长取训练配置。更换 clip/策略频率时不得沿用硬编码分母。
-
-READY 可以执行策略并保持 phase=0，传感/动作历史继续更新。触发投篮只启动 phase clock，保持历史和 frozen hoop 向量。这是可实现的运行方式，但当前 PRE_HOLD=0，模型没有经过长期 phase-zero 持球训练。Student 也不观察球位置/接触，不能据此保证球一定拿得住。
-
-可先在仿真中延长准备状态进行独立评估：
+导出检查 ONNX 结构、TorchScript/ONNX ReferenceEvaluator 与 PyTorch 输出一致性；安装 onnxruntime 后还检查该后端。manifest 中明确记录实际通过的项目。
 
 ```bash
-python scripts/rsl_rl/play_student.py --student-weights <model_or_export> --ready-hold-s 3
+python scripts/verify_student_bundle.py outputs/student_2026-09-30_13-23-24 --backend torchscript
+python scripts/verify_student_bundle.py outputs/student_2026-09-30_13-23-24 --backend onnxruntime
 ```
 
-该参数只是播放实验，不修改训练分布。要将 READY 作为长期真机控制状态，应先训练/验证扩展 PRE_HOLD 下的 Teacher，再用相同准备状态和扰动蒸馏 Student；不能仅修改部署 phase。结束 POST_HOLD 后由硬件状态机接管，不能把 DONE 等同于直接断开电机力矩。
-
-部署机器可以独立验收整包与实际推理后端：
-
-```bash
-python scripts/verify_student_bundle.py outputs/student_2026-09-29_17-26-30 --backend torchscript
-# 使用 ONNX Runtime 的部署端安装相应运行库后：
-python scripts/verify_student_bundle.py outputs/student_2026-09-29_17-26-30 --backend onnxruntime
-```
-
-phase=0 不是“禁止投篮”的指令。已有模型在持续 phase=0 下投篮或跌倒时，应暂停将它作为 READY 控制器，使用单独的准备控制器；先训练 Teacher 的 PRE_HOLD（例如 1–2 秒）并验证，再蒸馏对应 Student。增加 pre_hold 仅改变播放或导出配置，不会让现有权重学会持球稳定。
+校验脚本检查包哈希、新配置接口及实际后端的 verification_vectors。离线验收不等于真机稳定性验证。仿真播放可用 `--ready-hold-s 3` 进行 phase-zero 持球评估，该参数只改变本次播放时长，不改变模型训练分布。

@@ -110,10 +110,7 @@ class StudentObservation(ManagerTermBase):
             applied_action = action.actual_action_offset
             reset_ids = ids[self._pending_reset[ids]]
             if len(reset_ids):
-                hoop_delta = motion.hoop_center_pos_w()[reset_ids] - robot.data.root_link_pos_w[reset_ids]
-                self._initial_hoop[reset_ids] = quat_apply_inverse(
-                    robot.data.root_link_quat_w[reset_ids], hoop_delta
-                )
+                self._initial_hoop[reset_ids] = motion.reference["hoop_pos_cyl"][reset_ids]
                 self._sensor[:, reset_ids] = sensor[reset_ids]
                 self._action[:, reset_ids] = applied_action[reset_ids]
             self._sensor[self._sensor_cursor[ids], ids] = sensor[ids]
@@ -137,7 +134,9 @@ class StudentObservation(ManagerTermBase):
                 sensor_frames[:, :, 6:35].flatten(1) * scales.joint_position,
                 sensor_frames[:, :, 35:64].flatten(1) * scales.joint_velocity,
                 action_frames.flatten(1) * scales.applied_action,
-                self._initial_hoop * scales.hoop_position,
+                self._initial_hoop * self._initial_hoop.new_tensor(
+                    [scales.hoop_position, scales.hoop_theta, scales.hoop_position]
+                ),
             ),
             dim=-1,
         )
