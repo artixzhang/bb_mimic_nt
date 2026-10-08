@@ -189,13 +189,13 @@ class UnifiedRewardCfg:
     }
 
     relative_weights: tuple[float, float] = (1.0, 0.0)
-    root_sigmas: tuple[float, float, float, float] = (40.0, 10.0, 2.0, 0.5)
+    root_sigmas: tuple[float, float, float, float] = (40.0, 10.0, 2.0, 2.0)
     joint_sigmas: tuple[float, float] = (4.0, 0.1)
     joint_worst_weight: float = 0.30
     link_sigmas: tuple[float, float] = (40.0, 5.0)
     link_pos_worst_weight: float = 0.30
     link_rot_worst_weight: float = 0.30
-    rotation_only_sigma: float = 30.0
+    rotation_only_sigma: float = 20.0
     relative_sigmas: tuple[float, float] = (40.0, 1.0)
 
     hand_contact_distance: float = 0.02
@@ -208,7 +208,7 @@ class UnifiedRewardCfg:
     root_airborne_height_tolerance: float = 0.0
     root_airborne_height_weight: float = 2.0
     
-    action_magnitude_weight: float = 0.02
+    action_magnitude_weight: float = 0.03
     action_rate_weight: float = 0.8
     torque_weight: float = 0.25
     limit_weight: float = 0.05
