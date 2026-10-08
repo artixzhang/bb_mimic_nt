@@ -59,6 +59,7 @@ def test_real_batch_validation_contact_reordering_padding_and_hashes(tmp_path: P
     assert cache_is_current(cache_path, SOURCE, URDF)
     assert cache["anchor_pos_b"].shape[-2:] == (2, 3)
     assert cache["push_available"].shape == cache["valid"].shape
+    assert cache["obj_push"].shape == cache["valid"].shape
     assert cache["release"].shape == cache["valid"].shape
     assert cache["release_rising"].shape == cache["valid"].shape
     assert cache["release_falling"].shape == cache["valid"].shape
@@ -70,6 +71,7 @@ def test_real_batch_validation_contact_reordering_padding_and_hashes(tmp_path: P
         cache["release"][0, :length].numpy(), np.asarray(raw[0]["release"], dtype=np.float32)
     )
     assert np.array_equal(cache["push_available"][0, :length].numpy(), np.asarray(raw[0]["push_available"]))
+    assert np.array_equal(cache["obj_push"][0, :length].numpy(), np.asarray(raw[0]["obj_push"]))
     assert torch.all(cache["valid"][0, :length])
     assert not torch.any(cache["valid"][0, length:])
     if length < cache["valid"].shape[1]:
@@ -90,13 +92,14 @@ def test_invalid_fps_and_quaternion_are_rejected() -> None:
         validate_motion_batch([clip])
 
 
-def test_push_available_requires_one_binary_value_per_frame() -> None:
+@pytest.mark.parametrize("field", ["push_available", "obj_push"])
+def test_push_available_requires_one_binary_value_per_frame(field) -> None:
     clip = copy.deepcopy(joblib.load(SOURCE)[0])
-    clip["push_available"] = clip["push_available"][:-1]
-    with pytest.raises(ValueError, match="push_available.*shape"):
+    clip[field] = clip[field][:-1]
+    with pytest.raises(ValueError, match=f"{field}.*shape"):
         validate_motion_batch([clip])
-    clip["push_available"] = np.full(len(clip["root_pos"]), 0.5, dtype=np.float32)
-    with pytest.raises(ValueError, match="push_available labels must be binary"):
+    clip[field] = np.full(len(clip["root_pos"]), 0.5, dtype=np.float32)
+    with pytest.raises(ValueError, match=f"{field} labels must be binary"):
         validate_motion_batch([clip])
 
 
@@ -223,6 +226,7 @@ def test_cache_hash_invalidation(tmp_path: Path) -> None:
                 "contact_names": list(CONTACT_NAMES),
             },
             "push_available": torch.zeros(1, 1),
+            "obj_push": torch.zeros(1, 1),
             "release": torch.zeros(1, 1),
             "release_rising": torch.zeros(1, 1),
             "release_falling": torch.zeros(1, 1),

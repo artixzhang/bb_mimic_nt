@@ -21,7 +21,10 @@ parser.add_argument("--all-clips", action="store_true")
 parser.add_argument("--real-time", action="store_true")
 parser.add_argument("--ignore-failures", action="store_true")
 parser.add_argument("--no-timeout", action="store_true")
-parser.add_argument("--ready-hold-s", type=float, default=None, help="Run policy at phase zero before the shot; an evaluation override, not a learned-stability guarantee.")
+parser.add_argument(
+    "--pre_hold_s", "--pre-hold-s", type=float, default=None,
+    help="Override the configured pre-shot hold duration in seconds.",
+)
 parser.add_argument("--steps", type=int, default=0, help="Stop after this many steps; zero runs until closed.")
 AppLauncher.add_app_launcher_args(parser)
 args, hydra_args = parser.parse_known_args()
@@ -85,10 +88,10 @@ class StudentKeyboardController:
 def main(env_cfg, _agent_cfg):
     state, metadata = student_read_artifact(args.student_weights, args.student_config)
     student_apply_deployment_config(env_cfg, metadata)
-    if args.ready_hold_s is not None:
-        if not math.isfinite(args.ready_hold_s) or args.ready_hold_s < 0:
-            raise ValueError("Ready hold duration must be finite and non-negative.")
-        env_cfg.commands.motion.pre_hold_s = args.ready_hold_s
+    if args.pre_hold_s is not None:
+        if not math.isfinite(args.pre_hold_s) or args.pre_hold_s < 0:
+            raise ValueError("Pre hold duration must be finite and non-negative.")
+        env_cfg.commands.motion.pre_hold_s = args.pre_hold_s
     num_clips = len(joblib.load(MOTION_SOURCE))
     env_cfg.scene.num_envs = num_clips if args.all_clips else max(1, args.num_envs)
     if args.device is not None:

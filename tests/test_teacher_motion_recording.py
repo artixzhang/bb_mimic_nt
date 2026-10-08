@@ -28,7 +28,7 @@ def test_recorded_motion_matches_source_schema(tmp_path):
                            root_quat_w=torch.tensor([[0., 1., 0., 0.]]))
     env = SimpleNamespace(scene=SimpleNamespace(env_origins=origin))
     motion = SimpleNamespace(robot=SimpleNamespace(data=robot), ball=SimpleNamespace(data=ball),
-                             reference={'push_available': torch.tensor([True]), 'release': torch.tensor([0.])})
+                             reference={'obj_push': torch.tensor([False]), 'push_available': torch.tensor([True]), 'release': torch.tensor([0.])})
     frame = namespace['record_frame'](env, motion, list(reversed(range(29))), [2, 3, 0, 1])
     np.testing.assert_array_equal(frame['root_pos'], [1, 2, 3])
     np.testing.assert_array_equal(frame['obj_pos'], [4, 5, 6])

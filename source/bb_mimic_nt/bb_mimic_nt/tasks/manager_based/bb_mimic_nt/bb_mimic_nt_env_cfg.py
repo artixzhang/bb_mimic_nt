@@ -86,10 +86,26 @@ class DomainRandomizationCfg:
     foot_friction_nominal: float = 0.9
     foot_friction_delta: float = 0.3
     link_mass_fraction: float = 0.10
-    push_force_min_n: tuple[float, float, float] = (8.0, 8.0, 5.0)
-    push_force_max_n: tuple[float, float, float] = (20.0, 20.0, 10.0)
-    push_torque_max_nm: float = 5.0
-    push_duration_s: float = 0.8
+
+    push_force_min_n: tuple[float, float, float] = (30.0, 30.0, 20.0)
+    push_force_max_n: tuple[float, float, float] = (70.0, 70.0, 50.0)
+    push_torque_max_nm: float = 10.0
+    push_duration_s: float = 0.1
+    push_probability: float = 0.8
+    push_link_weights: dict[str, float] = {"torso_link": 0.5, "pelvis": 0.5}
+
+    global_push_force_min_n: tuple[float, float, float] = (3.0, 3.0, 3.0)
+    global_push_force_max_n: tuple[float, float, float] = (10.0, 10.0, 10.0)
+    global_push_torque_max_nm: float = 2.0
+    global_push_duration_s: float = 0.3
+    global_push_probability: float = 0.8
+    global_push_link_weights: dict[str, float] = {"torso_link": 0.5, "pelvis": 0.5}
+
+    object_push_force_min_n: tuple[float, float, float] = (3.0, 3.0, 3.0)
+    object_push_force_max_n: tuple[float, float, float] = (10.0, 10.0, 10.0)
+    object_push_torque_max_nm: float = 0.0
+    object_push_duration_s: float = 0.5
+    object_push_probability: float = 0.6
 
     delay: DRLatencyScheduleCfg = DRLatencyScheduleCfg()
     ball_mass: DRPhysicsScheduleCfg = DRPhysicsScheduleCfg()
@@ -98,6 +114,8 @@ class DomainRandomizationCfg:
     foot_friction: DRPhysicsScheduleCfg = DRPhysicsScheduleCfg()
     link_mass: DRPhysicsScheduleCfg = DRPhysicsScheduleCfg()
     push: DRPushScheduleCfg = DRPushScheduleCfg()
+    global_push: DRPushScheduleCfg = DRPushScheduleCfg()
+    object_push: DRPushScheduleCfg = DRPushScheduleCfg()
 
     # delay: DRScheduleCfg = DRDisabledCfg()
     # ball_mass: DRScheduleCfg = DRDisabledCfg()
@@ -151,10 +169,10 @@ class CommandsCfg:
         cache_path=str(MOTION_CACHE),
         urdf_path=str(ROBOT_URDF),
         rsi_decay_steps=RSI_DECAY_STEPS,
-        pre_hold_s=10.0,
-        post_hold_s=10.0,
+        pre_hold_s=5.0,
+        post_hold_s=5.0,
         # hold 采样 分别占动作的训练样本占比
-        hold_sampling_weights=(0.50, 0.50),
+        hold_sampling_weights=(0.40, 0.40),
         hoop_center_offset=BB_HOOP_CENTER_OFFSET,
         hoop_root_quat=BB_HOOP_ROOT_ROTATION,
     )
@@ -314,5 +332,5 @@ class G1ShootPlayEnvCfg(G1ShootEnvCfg):
         self.commands.motion.enable_adaptive_speed = False
         self.commands.motion.reset_dof_pos_noise = 0.0
         self.commands.motion.reset_dof_vel_noise = 0.0
-        for name in ("delay", "ball_mass", "pd_gains", "hand_friction", "foot_friction", "link_mass", "push"):
+        for name in ("delay", "ball_mass", "pd_gains", "hand_friction", "foot_friction", "link_mass", "push", "global_push", "object_push"):
             getattr(self.dr, name).enabled = False

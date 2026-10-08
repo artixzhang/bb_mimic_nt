@@ -107,4 +107,4 @@ python scripts/verify_student_bundle.py outputs/student_2026-09-30_13-23-24 --ba
 python scripts/verify_student_bundle.py outputs/student_2026-09-30_13-23-24 --backend onnxruntime
 ```
 
-校验脚本检查包哈希、新配置接口及实际后端的 verification_vectors。离线验收不等于真机稳定性验证。仿真播放可用 `--ready-hold-s 3` 进行 phase-zero 持球评估，该参数只改变本次播放时长，不改变模型训练分布。
+校验脚本检查包哈希、新配置接口及实际后端的 verification_vectors。离线验收不等于真机稳定性验证。仿真播放可用 `--pre_hold_s 3` 进行 phase-zero 持球评估，该参数只改变本次播放时长，不改变模型训练分布。

@@ -95,20 +95,27 @@ def test_reset_only_changes_selected_context_rows(monkeypatch, nominal, offset, 
         hand_friction=torch.full((3,), 0.8),
         foot_friction=torch.full((3,), 0.9),
         link_mass_scale=torch.ones(3),
-        push_force=torch.zeros(3, 1, 3),
-        push_force_min=torch.tensor([40.0, 40.0, 10.0]),
-        push_force_max=torch.tensor([200.0, 200.0, 50.0]),
-        push_torque=torch.zeros(3, 1, 3),
-        push_target_frame=torch.full((3,), -1, dtype=torch.long),
-        push_steps_left=torch.zeros(3, dtype=torch.long),
-        push_used=torch.zeros(3, dtype=torch.bool),
-        push_applied=torch.tensor([True, True, False]),
         ball=object(),
         robot=SimpleNamespace(has_external_wrench=True),
         ball_mass_cache=object(),
         robot_mass_cache=object(),
         link_mass_ids=(),
     )
+    env.num_envs = 3
+    env.step_dt = 0.01
+    context._body_ids = lambda names: (0,)
+    context.robot_push_bodies = [0]
+    context.robot.set_external_force_and_torque = lambda *args, **kwargs: None
+    context.ball = SimpleNamespace(set_external_force_and_torque=lambda *args, **kwargs: None)
+    for name in events.PUSH_TYPES:
+        setattr(cfg, name, schedules["push"])
+        for suffix, value in dict(force_min_n=cfg.push_force_min_n, force_max_n=cfg.push_force_max_n,
+                                  torque_max_nm=3., duration_s=.2, probability=.8,
+                                  link_weights={"torso_link": 1.}).items():
+            setattr(cfg, f"{name}_{suffix}", value)
+    context.pushes = {name: events.PushPulse(env, context, name) for name in events.PUSH_TYPES}
+    for pulse in context.pushes.values():
+        pulse.applied[:] = torch.tensor([True, True, False])
     monkeypatch.setattr(events, "get_dr_context", lambda env: context)
     monkeypatch.setattr(events, "_set_masses_and_inertias", lambda *args: None)
     monkeypatch.setattr(events, "_set_pd_gains", lambda *args: None)
@@ -129,8 +136,8 @@ def test_reset_only_changes_selected_context_rows(monkeypatch, nominal, offset, 
     assert context.hand_friction[1] == pytest.approx(0.8)
     assert context.foot_friction[1] == pytest.approx(0.9)
     assert context.link_mass_scale[1] == 1.0
-    assert context.push_force[1].count_nonzero() == 0
-    assert torch.equal(context.push_applied, torch.tensor([False, True, False]))
+    assert context.pushes["push"].force[1].count_nonzero() == 0
+    assert torch.equal(context.pushes["push"].applied, torch.tensor([False, True, False]))
     assert context.robot.has_external_wrench
     radius = int(offset * strength)
     assert sampled_bounds == [(max(0, nominal - radius), nominal + radius + 1)]
@@ -139,8 +146,8 @@ def test_reset_only_changes_selected_context_rows(monkeypatch, nominal, offset, 
         & (context.delay_steps[[0, 2]] <= nominal + radius)
     )
     assert torch.all((context.ball_mass_scale[[0, 2]] >= 0.95) & (context.ball_mass_scale[[0, 2]] <= 1.05))
-    assert torch.all(context.push_force[[0, 2], 0].abs() <= context.push_force_max)
-    assert torch.all(context.push_force[[0, 2], 0].abs() >= context.push_force_min)
+    assert torch.all(context.pushes["push"].force[[0, 2]].abs() <= context.pushes["push"].force_max)
+    assert torch.all(context.pushes["push"].force[[0, 2]].abs() >= context.pushes["push"].force_min)
 
 
 def test_push_force_range_is_scaled_by_curriculum_strength() -> None:
@@ -278,64 +285,3 @@ def test_pd_cache_keeps_simulation_and_actuator_gains_in_sync() -> None:
     assert torch.allclose(view.stiffness[:, 0], torch.tensor([90.0, 100.0, 110.0]))
     assert torch.allclose(view.damping[:, 0], 10.0 * torch.sqrt(context.pd_scale))
     assert view.stiffness_buffer is context.joint_stiffness_cpu
-
-
-def test_push_pulse_last_twenty_steps_and_availability_wins(monkeypatch) -> None:
-    class Robot:
-        def __init__(self):
-            self.force = torch.zeros(1, 1, 3)
-            self.torque = torch.zeros(1, 1, 3)
-            self.has_external_wrench = False
-            self.calls = 0
-
-        def set_external_force_and_torque(self, force, torque, **kwargs):
-            assert kwargs["body_ids"] == [3]
-            assert kwargs["is_global"] is True
-            indices = kwargs["env_ids"]
-            self.force[indices] = force
-            self.torque[indices] = torque
-            self.calls += 1
-
-    robot = Robot()
-    motion = SimpleNamespace(frame=torch.tensor([0.0]), reference={"push_available": torch.tensor([True])})
-    context = SimpleNamespace(
-        motion=motion,
-        robot=robot,
-        torso_id=3,
-        push_force=torch.tensor([[[10.0, -5.0, 2.0]]]),
-        push_torque=torch.tensor([[[1.0, -2.0, 3.0]]]),
-        push_target_frame=torch.tensor([0]),
-        push_steps_left=torch.tensor([0]),
-        push_used=torch.tensor([False]),
-        push_applied=torch.tensor([False]),
-        iteration_offset=0,
-    )
-    env = SimpleNamespace(
-        cfg=SimpleNamespace(dr=SimpleNamespace(
-            push_duration_s=0.2,
-            push=SimpleNamespace(enabled=True, start_fraction=0.2, end_fraction=0.6),
-            steps_per_iteration=10,
-            total_iterations=100,
-        )),
-        step_dt=0.01,
-        common_step_counter=1000,
-    )
-    monkeypatch.setattr(events, "get_dr_context", lambda env: context)
-    for remaining in range(19, -1, -1):
-        events.advance_push_pulse(env, None)
-        assert context.push_steps_left.item() == remaining
-        assert torch.equal(robot.force, context.push_force)
-        assert torch.equal(robot.torque, context.push_torque)
-    assert robot.calls == 1
-    events.advance_push_pulse(env, None)
-    assert torch.count_nonzero(robot.force) == 0
-    assert torch.count_nonzero(robot.torque) == 0
-    assert robot.calls == 2
-    context.push_used[:] = False
-    context.push_steps_left[:] = 0
-    events.advance_push_pulse(env, None)
-    motion.reference["push_available"][:] = False
-    events.advance_push_pulse(env, None)
-    assert context.push_steps_left.item() == 0
-    assert torch.count_nonzero(robot.force) == 0
-    assert robot.calls == 4

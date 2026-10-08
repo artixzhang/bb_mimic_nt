@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 import time
@@ -22,6 +23,10 @@ parser.add_argument("--clip-id", type=int, default=0)
 parser.add_argument("--num-envs", type=int, default=1)
 parser.add_argument("--all-clips", action="store_true")
 parser.add_argument("--real-time", action="store_true")
+parser.add_argument(
+    "--pre_hold_s", "--pre-hold-s", type=float, default=None,
+    help="Override the configured pre-shot hold duration in seconds.",
+)
 parser.add_argument(
     "--ignore-failures",
     action="store_true",
@@ -91,7 +96,12 @@ def main(env_cfg, agent_cfg):
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
     env_cfg.scene.num_envs = 100 if args_cli.all_clips else max(1, args_cli.num_envs)
     env_cfg.commands.motion.enable_rsi = False
-    env_cfg.dr.push.enabled = False
+    if args_cli.pre_hold_s is not None:
+        if not math.isfinite(args_cli.pre_hold_s) or args_cli.pre_hold_s < 0:
+            raise ValueError("Pre hold duration must be finite and non-negative.")
+        env_cfg.commands.motion.pre_hold_s = args_cli.pre_hold_s
+    for name in ("push", "global_push", "object_push"):
+        getattr(env_cfg.dr, name).enabled = False
     env_cfg.observations.policy.enable_corruption = False
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     if args_cli.ignore_failures:

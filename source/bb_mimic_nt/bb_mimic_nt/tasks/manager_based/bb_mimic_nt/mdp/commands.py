@@ -286,7 +286,8 @@ class MotionReferenceCommand(CommandTerm):
         frame_ids = torch.minimum(frame_ids, self.lengths[self.clip_ids] - 1)
         for name in ("release", "release_rising", "release_falling"):
             self.reference[name] = self._batch[name][self.clip_ids, frame_ids]
-        self.reference["push_available"] = self._batch["push_available"][self.clip_ids, frame_ids] > 0.5
+        for name in ("push_available", "obj_push"):
+            self.reference[name] = self._batch[name][self.clip_ids, frame_ids] > 0.5
         velocity_fields = (
             "root_lin_vel",
             "root_ang_vel",

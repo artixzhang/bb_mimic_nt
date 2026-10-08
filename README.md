@@ -88,7 +88,7 @@ python scripts/rsl_rl/train.py --task BbMimicNT-G1-Shoot-v0 --headless \
 
 ## Domain Randomization
 
-每次环境 reset 独立采样，直到下次 reset 保持不变。`env_cfg.dr` 为七项 DR 分别提供 `enabled`、`start_fraction` 和 `end_fraction`，并集中配置标称值、采样幅度和推力持续时间；默认在训练进度 20% 前使用标称值，20%–60% 通过 cubic smoothstep S 曲线平滑扩大范围，课程起止点斜率均为零。六维特权观测依次为延迟、篮球质量、PD 比例、手部摩擦、脚部摩擦、腿部及骨盆 link 质量比例，按完整范围映射到 [-1, 1]，标称值均为 0。
+每次环境 reset 独立采样，直到下次 reset 保持不变。`env_cfg.dr` 为各项 DR 分别提供 `enabled`、`start_fraction` 和 `end_fraction`，并集中配置标称值、采样幅度和推力持续时间；默认在训练进度 20% 前使用标称值，20%–60% 通过 cubic smoothstep S 曲线平滑扩大范围，课程起止点斜率均为零。六维特权观测依次为延迟、篮球质量、PD 比例、手部摩擦、脚部摩擦、腿部及骨盆 link 质量比例，按完整范围映射到 [-1, 1]，标称值均为 0。
 
 | 项目 | 标称值 | 完整采样范围 |
 | --- | ---: | ---: |
@@ -98,11 +98,22 @@ python scripts/rsl_rl/train.py --task BbMimicNT-G1-Shoot-v0 --headless \
 | 双手静、动摩擦 | 0.8 | 0.6–1.0 |
 | 双脚静、动摩擦 | 0.9 | 0.6–1.2 |
 | 骨盆及八个髋/膝 link 质量 | 各 link 默认质量 | 共用比例 ±10%，惯量同比例变化 |
-| `torso_link` 外力和力矩 | 0 | 世界坐标 X/Y 各 ±200 N、Z ±50 N，力矩各轴 ±3 Nm；最长 200 ms |
+| 三类 Push 外力和力矩（各自独立配置） | 0 | 默认世界坐标 X/Y 幅值 8–20 N、Z 幅值 5–10 N，随机正负；力矩各轴 ±5 Nm；最长 800 ms |
 
 延迟由 `env_cfg.dr.delay_nominal_steps`（默认 0）和 `delay_max_offset_steps`（默认 2）控制。课程半径为 `floor(delay_max_offset_steps * strength)`，reset 时在 `[max(0, nominal-radius), nominal+radius]` 内均匀采样整数步，负下界先截为 0；不会先采样负数再将样本裁成 0。延迟课程在训练进度 30%–70% 扩大范围：固定 0 → 0–1 → 0–2 步。标称值是课程起点和播放值，完整均匀分布的中位数为 1 步。要改为标称 1、采样 0–2 步，设为 `1, 1`；固定零延迟设为 `0, 0`。延迟特权观测通式为 `(steps-nominal)/max(offset, 1)`。
 
-外力每次 rollout 最多触发一次，起点从当前 RSI 帧之后的 `push_available=1` 参考帧均匀选取。标记变为 0 时立即停止脉冲。播放和评估关闭随机化及外力，使用固定标称值，默认 0 步执行延迟。
+三类 Push 每个 episode 各独立抽取一次是否触发（默认概率 0.8），各最多触发一个脉冲，可以同时发生。`dr.push.enabled`、`dr.global_push.enabled`、`dr.object_push.enabled` 分别控制开关，训练默认均开启。Teacher 三者默认沿用 Push 的 15%–80% smoothstep 课程；Student 三者沿用 Student Push 的 10%–35% 课程。力、力矩在 reset 时按课程强度缩放，概率不随课程缩放。
+
+- `push`：由逐帧 `push_available` 控制机器人推力。
+- `global_push`：忽略 `push_available`，从本次剩余的 pre-hold、动作段、post-hold 全时间段采样一次。
+- `object_push`：由逐帧 `obj_push` 控制，自动作用于轨迹物体 `ball`。
+
+采样按参考时间均匀进行，动作段自适应速度会改变实际触发时刻；RSI 之前的时间和未选中的 hold 不参与采样。pre-hold/post-hold 沿用首帧/末帧的可推标记。门控关闭或进入 DONE 时立即结束对应脉冲，结束后不再重触发。80% 是 episode 的独立抽取概率；没有可用时段、课程强度为零或 episode 提前结束时，实际遇到 Push 的比例可能更低。
+
+每类用 `<类型>_force_min_n`、`<类型>_force_max_n`、`<类型>_torque_max_nm`、`<类型>_duration_s`、`<类型>_probability` 单独配置，例如 `global_push_force_max_n`。机器人两类用 `push_link_weights` / `global_push_link_weights` 指定精确 link 名和相对权重，例如 `{"torso_link": 3.0, "pelvis": 1.0}`；每类每次只选一个 link，默认 `{"torso_link": 1.0}`。同一 link 上的两类力和力矩相加。三类共用 `EventsCfg.push` 的逐策略步事件，以一次合成写入避免覆盖；独立开关放在 `dr`，无需增加多个互相覆盖的事件。
+
+缓存 schema 已升级至 7，预处理要求 `obj_push` 为逐帧 bool/0/1；旧缓存会自动判为过期，需由更新后的原始数据重建。录制脚本也逐帧保留此字段。播放和评估默认关闭三类 Push。
+
 
 TensorBoard 除 reward/termination 外，还记录 `Metrics/motion/error/*` 的原始 reference tracking error，以及 `Metrics/motion/control/*` 的 action 变化、PD target 变化、action 饱和率、关节速度和力矩占比。`Metrics/motion/phase/{controlled,free}/*` 按 `release` 分段汇总，`error/joint/*` 与 `control/joint/*` 提供逐关节误差和动作幅度。这些指标带有物理单位，适合排查 reward 上升但动作抖动的问题。
 

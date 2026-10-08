@@ -45,6 +45,8 @@ class StudentDomainRandomizationCfg(DomainRandomizationCfg):
     foot_friction: StudentPhysicsScheduleCfg = StudentPhysicsScheduleCfg()
     link_mass: StudentPhysicsScheduleCfg = StudentPhysicsScheduleCfg()
     push: StudentPushScheduleCfg = StudentPushScheduleCfg()
+    global_push: StudentPushScheduleCfg = StudentPushScheduleCfg()
+    object_push: StudentPushScheduleCfg = StudentPushScheduleCfg()
 
 
 @configclass
@@ -150,5 +152,5 @@ class G1ShootStudentPlayEnvCfg(G1ShootStudentEnvCfg):
         self.commands.motion.hold_sampling_weights = None
         self.student_observation.enable_noise = False
         self.student_observation.randomize_delay = False
-        for name in ("delay", "ball_mass", "pd_gains", "hand_friction", "foot_friction", "link_mass", "push"):
+        for name in ("delay", "ball_mass", "pd_gains", "hand_friction", "foot_friction", "link_mass", "push", "global_push", "object_push"):
             getattr(self.dr, name).enabled = False

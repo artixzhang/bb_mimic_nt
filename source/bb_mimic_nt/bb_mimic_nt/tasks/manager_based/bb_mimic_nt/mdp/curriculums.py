@@ -44,5 +44,5 @@ def dr_curriculum(env, env_ids) -> dict[str, float]:
     iteration = get_dr_context(env).iteration_offset + env.common_step_counter / cfg.steps_per_iteration
     return {
         name: curriculum_strength(getattr(cfg, name), iteration, cfg.total_iterations)
-        for name in ("delay", "ball_mass", "pd_gains", "hand_friction", "foot_friction", "link_mass", "push")
+        for name in ("delay", "ball_mass", "pd_gains", "hand_friction", "foot_friction", "link_mass", "push", "global_push", "object_push")
     }

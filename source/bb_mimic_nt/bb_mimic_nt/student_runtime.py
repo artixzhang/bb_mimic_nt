@@ -95,6 +95,19 @@ def student_apply_teacher_config(env_cfg, checkpoint: Path) -> tuple[dict, dict]
         setattr(env_cfg.dr, name, teacher_dr[name])
     env_cfg.dr.push_force_max_n = tuple(teacher_dr["push_force_max_n"])
     env_cfg.dr.push_force_min_n = tuple(teacher_dr.get("push_force_min_n", (0.0, 0.0, 0.0)))
+    for prefix in ("push", "global_push", "object_push"):
+        for suffix in ("probability", "force_min_n", "force_max_n", "torque_max_nm", "duration_s", "link_weights"):
+            key = f"{prefix}_{suffix}"
+            if key in teacher_dr:
+                value = teacher_dr[key]
+                if suffix in ("force_min_n", "force_max_n"):
+                    value = tuple(value)
+                elif suffix == "link_weights":
+                    value = dict(value)
+                setattr(env_cfg.dr, key, value)
+        # Old teacher runs had no additional pushes.
+        if prefix != "push" and prefix not in teacher_dr and hasattr(env_cfg.dr, prefix):
+            getattr(env_cfg.dr, prefix).enabled = False
     teacher_motion = environment["commands"]["motion"]
     for name in (
         "source_path", "cache_path", "urdf_path", "pre_hold_s", "post_hold_s",

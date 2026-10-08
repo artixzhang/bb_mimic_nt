@@ -18,7 +18,7 @@ import joblib
 import numpy as np
 import torch
 
-CACHE_SCHEMA_VERSION = 6
+CACHE_SCHEMA_VERSION = 7
 
 TRACKED_BODY_NAMES = (
     "left_hand",
@@ -90,6 +90,7 @@ _REQUIRED_KEYS = {
     "obj_rot",
     "contact",
     "push_available",
+    "obj_push",
     "contact_names",
     "fps",
     "dof_names",
@@ -221,6 +222,7 @@ def _validate_clip(clip: dict[str, Any], clip_index: int) -> None:
         "obj_rot": (frame_count, 4),
         "contact": (frame_count, 4),
         "push_available": (frame_count,),
+        "obj_push": (frame_count,),
         "hoop_pos_w": (3,),
         "hoop_pos_cyl": (3,),
     }
@@ -252,9 +254,10 @@ def _validate_clip(clip: dict[str, Any], clip_index: int) -> None:
     contacts = np.asarray(clip["contact"])
     if not np.all(np.logical_or(np.isclose(contacts, 0.0), np.isclose(contacts, 1.0))):
         raise ValueError(f"Clip {clip_index} contact labels must be binary.")
-    push_available = np.asarray(clip["push_available"])
-    if not np.all(np.logical_or(push_available == 0.0, push_available == 1.0)):
-        raise ValueError(f"Clip {clip_index} push_available labels must be binary.")
+    for field in ("push_available", "obj_push"):
+        labels = np.asarray(clip[field])
+        if not np.all(np.logical_or(labels == 0.0, labels == 1.0)):
+            raise ValueError(f"Clip {clip_index} {field} labels must be binary.")
     if "release" in clip:
         release = np.asarray(clip["release"])
         if release.shape != (frame_count,):
@@ -436,6 +439,8 @@ def cache_is_current(
         metadata = cache["metadata"]
         return bool(
             metadata["schema_version"] == CACHE_SCHEMA_VERSION
+            and "obj_push" in cache
+            and cache["obj_push"].shape == cache["valid"].shape
             and "push_available" in cache
             and cache["push_available"].shape == cache["valid"].shape
             and "release" in cache
@@ -527,6 +532,7 @@ def preprocess_motion_batch(
                 "release_rising": release_rising,
                 "release_falling": release_falling,
                 "push_available": np.asarray(clip["push_available"], dtype=np.float32),
+                "obj_push": np.asarray(clip["obj_push"], dtype=np.float32),
                 "hoop_pos_cyl": np.repeat(np.asarray(clip["hoop_pos_cyl"], dtype=np.float32)[None], len(root_pos), axis=0),
                 "hoop_pos": np.repeat(np.asarray(clip["hoop_pos_w"], dtype=np.float32)[None], len(root_pos), axis=0),
                 "link_lin_vel_w": finite_difference(fk["link_pos_w"], dt),
@@ -568,6 +574,7 @@ def preprocess_motion_batch(
         "link_lin_vel_w",
         "link_ang_vel_w",
         "push_available",
+        "obj_push",
         "release_rising",
         "release_falling",
     }
@@ -594,7 +601,7 @@ def load_motion_batch(
         )
     if "push_available" not in cache or cache["push_available"].shape != cache["valid"].shape:
         raise ValueError("Motion cache has no valid push_available field.")
-    for field in ("release", "release_rising", "release_falling"):
+    for field in ("release", "release_rising", "release_falling", "obj_push"):
         if field not in cache or cache[field].shape != cache["valid"].shape:
             raise ValueError(f"Motion cache has no valid {field} field.")
     return cache

@@ -159,7 +159,7 @@ def contact_graph_reward(
 @configclass
 class UnifiedRewardCfg:
     # body, obj, relative, contact
-    global_weights: tuple[float, float, float, float] = (0.45, 0.25, 0.25, 0.15)
+    global_weights: tuple[float, float, float, float] = (0.45, 0.20, 0.20, 0.15)
     # root, joint, link, rotation_only
     body_weights: tuple[float, float, float, float] = (0.30, 0.30, 0.30, 0.10)
     # position, rotation, linear_velocity, angular_velocity
@@ -170,10 +170,10 @@ class UnifiedRewardCfg:
     link_weights: tuple[float, float] = (0.50, 0.50)
 
     # position, direction, speed_magnitude, rotation
-    object_weights: tuple[float, float, float, float] = (0.45, 0.35, 0.2, 0.0)
-    object_sigmas: tuple[float, float, float, float] = (10.0, 5.0, 0.5, 1.0)
+    object_weights: tuple[float, float, float, float] = (0.50, 0.30, 0.2, 0.0)
+    object_sigmas: tuple[float, float, float, float] = (20.0, 10.0, 5.0, 1.0)
     object_free_phase_weight: float = 1.0
-    relative_free_phase_weight: float = 1.0
+    relative_free_phase_weight: float = 0.3
 
     link_pos_body_weights: dict[str, float] = {
         "left_hand": 2.0, 
@@ -184,8 +184,8 @@ class UnifiedRewardCfg:
     link_rot_body_weights: dict[str, float] = {
         "left_hand": 2.0, 
         "right_hand": 2.0,
-        "left_ankle_roll_link": 2.0,
-        "right_ankle_roll_link": 2.0,
+        "left_ankle_roll_link": 3.0,
+        "right_ankle_roll_link": 3.0,
     }
 
     relative_weights: tuple[float, float] = (1.0, 0.0)
@@ -195,7 +195,7 @@ class UnifiedRewardCfg:
     link_sigmas: tuple[float, float] = (40.0, 5.0)
     link_pos_worst_weight: float = 0.30
     link_rot_worst_weight: float = 0.30
-    rotation_only_sigma: float = 5.0
+    rotation_only_sigma: float = 30.0
     relative_sigmas: tuple[float, float] = (40.0, 1.0)
 
     hand_contact_distance: float = 0.02
@@ -204,9 +204,9 @@ class UnifiedRewardCfg:
     hand_contact_force: float = 1.0
     foot_contact_force: float = 5.0
     foot_airborne_height_tolerance: float = 0.0
-    foot_airborne_height_weight: float = 0.0
+    foot_airborne_height_weight: float = 0.2
     root_airborne_height_tolerance: float = 0.0
-    root_airborne_height_weight: float = 1.0
+    root_airborne_height_weight: float = 2.0
     
     action_magnitude_weight: float = 0.02
     action_rate_weight: float = 0.8

@@ -64,6 +64,7 @@ def record_frame(env, motion, joint_ids, contact_ids):
         'contact': contact_graph(env)[0, contact_ids],
         # These are semantic reference annotations, not contact-derived labels.
         'push_available': motion.reference['push_available'][0],
+        'obj_push': motion.reference['obj_push'][0],
         'release': motion.reference['release'][0],
     }
     return {name: value.detach().cpu().numpy().copy() for name, value in values.items()}
