@@ -38,7 +38,7 @@ from bb_mimic_nt.trajectory.processing import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ASSET_ROOT = PROJECT_ROOT / "source/bb_mimic_nt/assets"
-SOURCE = ASSET_ROOT / "trajectory/shoot_batch_0928.pkl"
+SOURCE = ASSET_ROOT / "trajectory/setshot_1008.pkl"
 URDF = ASSET_ROOT / "robots/g1/urdf/g1_29dof_mode16_bb.urdf"
 
 

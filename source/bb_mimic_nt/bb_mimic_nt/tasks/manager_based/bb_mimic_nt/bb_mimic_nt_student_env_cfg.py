@@ -9,6 +9,7 @@ from isaaclab.utils import configclass
 
 from bb_mimic_nt.robots.unitree_g1_bb import G1Constants
 from bb_mimic_nt.student import STUDENT_HISTORY_LENGTH
+from bb_mimic_nt.training import NUM_ENVS
 
 from . import mdp
 from .bb_mimic_nt_env_cfg import (
@@ -126,7 +127,7 @@ class StudentCurriculumCfg:
 
 @configclass
 class G1ShootStudentEnvCfg(G1ShootEnvCfg):
-    scene: StudentSceneCfg = StudentSceneCfg(num_envs=8192, env_spacing=7.0)
+    scene: StudentSceneCfg = StudentSceneCfg(num_envs=NUM_ENVS, env_spacing=7.0)
     observations: StudentObservationsCfg = StudentObservationsCfg()
     actions: StudentActionsCfg = StudentActionsCfg()
     rewards: StudentRewardsCfg = StudentRewardsCfg()

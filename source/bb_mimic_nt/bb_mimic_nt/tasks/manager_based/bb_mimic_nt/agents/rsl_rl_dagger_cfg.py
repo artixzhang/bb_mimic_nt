@@ -7,10 +7,12 @@ from isaaclab_rl.rsl_rl import (
     RslRlDistillationStudentTeacherCfg,
 )
 
+from bb_mimic_nt.training import DAGGER_BATCH_SIZE, DAGGER_REPLAY_CAPACITY, DAGGER_STEPS_PER_ENV
+
 
 @configclass
 class G1ShootStudentDAggerCfg(RslRlDistillationRunnerCfg):
-    num_steps_per_env: int = 24
+    num_steps_per_env: int = DAGGER_STEPS_PER_ENV
     max_iterations: int = 1000
     save_interval: int = 50
     experiment_name: str = "g1_shoot_student_dagger_v1"
@@ -31,11 +33,11 @@ class G1ShootStudentDAggerCfg(RslRlDistillationRunnerCfg):
         max_grad_norm=1.0,
         loss_type="mse",
     )
-    # Recent half holds 32 steps at 8192 envs, including the full 24-step rollout.
-    replay_capacity: int = 524_288
+    # Scale with training defaults so the recent half covers a full rollout.
+    replay_capacity: int = DAGGER_REPLAY_CAPACITY
     replay_recent_storage_fraction: float = 0.5
     replay_recent_sample_fraction: float = 0.75
     updates_per_iteration: int = 32
-    batch_size: int = 8192
+    batch_size: int = DAGGER_BATCH_SIZE
     student_execution_start_fraction: float = 0.10
     student_execution_end_fraction: float = 0.30

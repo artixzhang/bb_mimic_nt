@@ -9,8 +9,8 @@
 - 仿真 / 策略频率：200 Hz / 100 Hz（decimation 2）
 - 动作：29 维 reference-relative PD residual；Gaussian policy 输出经 `tanh` 约束，最终 PD 目标限制在机械关节限位内，再按每环境 0–2 个策略步延迟执行
 - Teacher observation：固定 674 维，包含当前状态、reference pose/velocity/contact、object-control state、历史、phase、reference speed 和 6 维 DR 特权参数
-- 原始轨迹：`source/bb_mimic_nt/assets/trajectory/shoot_batch_0928.pkl`
-- 预处理缓存：同目录 `shoot_batch_0928_processed.pt`（自动生成并被 Git 忽略）
+- 原始轨迹：`source/bb_mimic_nt/assets/trajectory/setshot_1008.pkl`
+- 预处理缓存：同目录 `setshot_1008_processed.pt`（自动生成并被 Git 忽略）
 - 场景资产配置：`source/bb_mimic_nt/bb_mimic_nt/objects/`；环境直接复用其中的篮球、floating hoop 和地面配置
 
 轨迹被解释为每个并行环境自己的 local-world 坐标；写入仿真时才叠加 env origin。缓存包含 schema、源文件与 URDF 哈希、有效长度、padding mask、29 DoF、四路 contact、逐帧 `push_available`、`release`、FK link / hand anchor 及差分速度。哈希或 schema 过期时，训练会自动重建。
@@ -30,14 +30,14 @@ python scripts/preprocess_trajectory.py
 
 ```bash
 python scripts/preprocess_trajectory.py \
-  --input source/bb_mimic_nt/assets/trajectory/shoot_batch_0928.pkl \
-  --output source/bb_mimic_nt/assets/trajectory/shoot_batch_0928_processed.pt \
+  --input source/bb_mimic_nt/assets/trajectory/setshot_1008.pkl \
+  --output source/bb_mimic_nt/assets/trajectory/setshot_1008_processed.pt \
   --force
 ```
 
 ## 训练
 
-默认使用 4096 个环境、每次 rollout 96 步、5000 次 PPO iteration。RSI 概率在前 30% policy steps 从 0.8 线性降到 0。
+默认使用 16384 个环境、每次 rollout 48 步、4000 次 PPO iteration。Teacher 和 Student 的默认环境数统一由 `source/bb_mimic_nt/bb_mimic_nt/training.py` 中的 `NUM_ENVS` 控制（多 GPU 时为每个进程的环境数）；`PPO_STEPS_PER_ENV` 控制 Teacher rollout，Student 的 `DAGGER_STEPS_PER_ENV` 默认跟随它。RSI 概率在前 30% policy steps 从 0.8 线性降到 0，当前为 57600 步。命令行和 Hydra 参数仍可覆盖默认配置。
 
 ```bash
 python scripts/rsl_rl/train.py \
@@ -193,7 +193,7 @@ python scripts/rsl_rl/train_dagger.py \
   --headless
 ```
 
-Teacher 的网络结构、动作缩放、DR 范围、参考轨迹、前后 HOLD 和 reset 关节噪声从所选 checkpoint 的 `params/` 读取。Student 保持关闭 RSI 和自适应速度。训练前即写出 `params/env.yaml`、`params/agent.yaml` 和 `params/student_config.json`；每个 `model_*.pt` 都包含独立导出所需的模型结构与部署 metadata。默认每轮收集 24 步并更新 32 次；回放容量为 524288，一半保存最新 FIFO 状态、一半作为会持续更新的全历史 reservoir。8192 个环境时 recent 可容纳 32 步，覆盖默认完整 rollout；469 维输入时两分区合计约占 1.0 GB 显存，每个 batch 默认 75% 采样最新状态，保留最新闭环状态与历史覆盖。回放数据常驻训练 device，避免 rollout 期间 CPU/GPU 往返；如需在恢复训练时连同回放集恢复，可添加 `--save-replay`。
+Teacher 的网络结构、动作缩放、DR 范围、参考轨迹、前后 HOLD 和 reset 关节噪声从所选 checkpoint 的 `params/` 读取。Student 保持关闭 RSI 和自适应速度。训练前即写出 `params/env.yaml`、`params/agent.yaml` 和 `params/student_config.json`；每个 `model_*.pt` 都包含独立导出所需的模型结构与部署 metadata。默认每轮收集 48 步并更新 32 次，batch size 跟随 `NUM_ENVS`（当前 16384）；回放容量由 `training.py` 按 `2 * NUM_ENVS * max(32, DAGGER_STEPS_PER_ENV)` 推导，当前为 1572864，一半保存最新 FIFO 状态、一半作为会持续更新的全历史 reservoir。16384 个环境时 recent 可容纳完整 48 步；469 维输入加 29 维标签时两分区合计约占 3.13 GB（2.92 GiB）显存，每个 batch 默认 75% 采样最新状态，保留最新闭环状态与历史覆盖。这些是默认配置的联动计算；若通过 CLI/Hydra 单独覆盖环境数或 rollout，请相应检查 `--replay-capacity` 和 `--batch-size`。回放数据常驻训练 device，避免 rollout 期间 CPU/GPU 往返；如需在恢复训练时连同回放集恢复，可添加 `--save-replay`。
 
 新默认配置需要从头训练，旧的 283 维 checkpoint 不能续训为 469 维。旧导出模型仍可播放，加载时会从 metadata 恢复其 3 帧历史和原延迟。DAgger 日志增加每关节目标 MAE、Student/Teacher 目标逐步变化 RMS、目标变化差、失败回合比例与回合步数；动作变化指标排除跨 reset 的跳变，均以 rad 为单位。
 

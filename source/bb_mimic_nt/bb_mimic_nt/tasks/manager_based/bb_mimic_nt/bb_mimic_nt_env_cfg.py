@@ -31,15 +31,15 @@ from bb_mimic_nt.objects import (
     BB_HOOP_ROOT_ROTATION,
 )
 from bb_mimic_nt.robots.unitree_g1_bb import G1_BB_CFG, G1Constants
-from bb_mimic_nt.training import PPO_MAX_ITERATIONS, PPO_STEPS_PER_ENV, RSI_DECAY_STEPS
+from bb_mimic_nt.training import NUM_ENVS, PPO_MAX_ITERATIONS, PPO_STEPS_PER_ENV, RSI_DECAY_STEPS
 
 from . import mdp
 
 
 EXTENSION_ROOT = Path(__file__).resolve().parents[4]
 ASSET_ROOT = EXTENSION_ROOT / "assets"
-MOTION_SOURCE = ASSET_ROOT / "trajectory" / "shoot_batch_0928.pkl"
-MOTION_CACHE = ASSET_ROOT / "trajectory" / "shoot_batch_0928_processed.pt"
+MOTION_SOURCE = ASSET_ROOT / "trajectory" / "setshot_1008.pkl"
+MOTION_CACHE = ASSET_ROOT / "trajectory" / "setshot_1008_processed.pt"
 ROBOT_URDF = ASSET_ROOT / "robots" / "g1" / "urdf" / "g1_29dof_mode16_bb.urdf"
 
 
@@ -287,7 +287,7 @@ class EventsCfg:
 
 @configclass
 class G1ShootEnvCfg(ManagerBasedRLEnvCfg):
-    scene: G1ShootSceneCfg = G1ShootSceneCfg(num_envs=8192, env_spacing=7.0)
+    scene: G1ShootSceneCfg = G1ShootSceneCfg(num_envs=NUM_ENVS, env_spacing=7.0)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     commands: CommandsCfg = CommandsCfg()
@@ -312,7 +312,7 @@ class G1ShootEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physx.enable_ccd = True
         self.sim.physx.bounce_threshold_velocity = 0.2
         # Leave headroom for contact peaks during synchronized resets and
-        # Student take-over with 8192 environments. These fixed buffers do not
+        # Student take-over with 16384 environments. These fixed buffers do not
         # automatically grow when more device memory is available.
         self.sim.physx.gpu_max_rigid_patch_count = 2**19
         self.sim.physx.gpu_collision_stack_size = 2**29

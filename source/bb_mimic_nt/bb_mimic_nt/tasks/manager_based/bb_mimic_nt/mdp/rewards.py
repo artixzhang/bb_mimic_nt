@@ -277,9 +277,21 @@ class UnifiedMimicReward(ManagerTermBase):
     def __init__(self, cfg, env):
         super().__init__(cfg, env)
         self._episode_sums: dict[str, torch.Tensor] = {}
+        self._body_weight_cache: dict[str, tuple[tuple, torch.Tensor | None]] = {}
         self._previous_policy_action: torch.Tensor | None = None
         self._previous_previous_policy_action: torch.Tensor | None = None
         self._action_history_length = torch.zeros(self.num_envs, dtype=torch.uint8, device=self.device)
+
+    def _body_weights(self, kind: str, body_names: tuple[str, ...], overrides) -> torch.Tensor | None:
+        # Include values in the key so interactive edits of reward settings
+        # still take effect, without rebuilding CUDA tensors every step.
+        key = (tuple(body_names), tuple(overrides.items()) if overrides else ())
+        cached = self._body_weight_cache.get(kind)
+        if cached is None or cached[0] != key:
+            with torch.inference_mode(False):
+                weights = _resolve_body_weights(body_names, overrides, self.device)
+            self._body_weight_cache[kind] = (key, weights)
+        return self._body_weight_cache[kind][1]
 
     def _action_accel(self, action: torch.Tensor) -> torch.Tensor:
         if self._previous_policy_action is None:
@@ -361,8 +373,8 @@ class UnifiedMimicReward(ManagerTermBase):
             quat_inv(root_quat.reshape(-1, 4)), body_quat.reshape(-1, 4)
         ).reshape_as(body_quat)
 
-        link_pos_weights = _resolve_body_weights(term.tracked_body_names, settings.link_pos_body_weights, self.device)
-        link_rot_weights = _resolve_body_weights(term.tracked_body_names, settings.link_rot_body_weights, self.device)
+        link_pos_weights = self._body_weights("position", term.tracked_body_names, settings.link_pos_body_weights)
+        link_rot_weights = self._body_weights("rotation", term.tracked_body_names, settings.link_rot_body_weights)
 
         link_parts = {
             "mimic/body/link/position": link_position_reward(

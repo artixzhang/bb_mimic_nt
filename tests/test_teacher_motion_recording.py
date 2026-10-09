@@ -19,7 +19,7 @@ def test_recorded_motion_matches_source_schema(tmp_path):
                  if isinstance(node, ast.FunctionDef) and node.name in ('record_frame', 'assemble_clip')]
     namespace = dict(np=np, copy=copy, contact_graph=lambda env: torch.tensor([[1., 0., 0., 1.]]))
     exec(compile(ast.Module(body=functions, type_ignores=[]), str(path), 'exec'), namespace)
-    template = joblib.load(ROOT / 'source/bb_mimic_nt/assets/trajectory/shoot_batch_0928.pkl')[0]
+    template = joblib.load(ROOT / 'source/bb_mimic_nt/assets/trajectory/setshot_1008.pkl')[0]
     origin = torch.tensor([[7., 14., 0.]])
     robot = SimpleNamespace(root_link_pos_w=origin + torch.tensor([[1., 2., 3.]]),
                             root_link_quat_w=torch.tensor([[1., 0., 0., 0.]]),

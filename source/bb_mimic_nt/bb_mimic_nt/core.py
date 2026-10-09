@@ -82,6 +82,16 @@ def slerp_wxyz(first: torch.Tensor, second: torch.Tensor, blend: torch.Tensor) -
     return torch.nn.functional.normalize(torch.where(near, linear, interpolated), dim=-1)
 
 
+def motion_interpolation_indices(
+    clip_ids: torch.Tensor, frame: torch.Tensor, lengths: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute frame indices once for all fields in a reference refresh."""
+    last = lengths[clip_ids] - 1
+    lower = torch.minimum(torch.floor(frame).long().clamp_min(0), last)
+    upper = torch.minimum(lower + 1, last)
+    return lower, upper, frame - lower.float()
+
+
 def interpolate_motion(
     values: torch.Tensor,
     clip_ids: torch.Tensor,
@@ -89,12 +99,12 @@ def interpolate_motion(
     lengths: torch.Tensor,
     *,
     quaternion: bool = False,
+    indices: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Interpolate padded motion tensors without ever indexing padding."""
-    last = lengths[clip_ids] - 1
-    lower = torch.minimum(torch.floor(frame).long().clamp_min(0), last)
-    upper = torch.minimum(lower + 1, last)
-    blend = frame - lower.float()
+    if indices is None:
+        indices = motion_interpolation_indices(clip_ids, frame, lengths)
+    lower, upper, blend = indices
     first = values[clip_ids, lower]
     second = values[clip_ids, upper]
     if quaternion:

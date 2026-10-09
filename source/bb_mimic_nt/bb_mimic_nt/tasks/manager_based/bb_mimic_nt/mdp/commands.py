@@ -19,7 +19,14 @@ from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.math import quat_apply, quat_apply_inverse, quat_error_magnitude, quat_inv, quat_mul
 
-from bb_mimic_nt.core import downward_hoop_crossing, hold_sampling_probability, interpolate_motion, rsi_probability, select_adaptive_speed
+from bb_mimic_nt.core import (
+    downward_hoop_crossing,
+    hold_sampling_probability,
+    interpolate_motion,
+    motion_interpolation_indices,
+    rsi_probability,
+    select_adaptive_speed,
+)
 from bb_mimic_nt.trajectory import (
     TRACKED_BODY_NAMES,
     cache_is_current,
@@ -247,13 +254,14 @@ class MotionReferenceCommand(CommandTerm):
     def in_active_motion(self) -> torch.Tensor:
         return self.stage == STAGE_ACTIVE
 
-    def _sample(self, field: str, quaternion: bool = False) -> torch.Tensor:
+    def _sample(self, field: str, quaternion: bool = False, *, indices=None) -> torch.Tensor:
         return interpolate_motion(
             self._batch[field],
             self.clip_ids,
             self.frame,
             self.lengths,
             quaternion=quaternion,
+            indices=indices,
         )
 
     def _refresh_reference(self) -> None:
@@ -280,10 +288,14 @@ class MotionReferenceCommand(CommandTerm):
             "anchor_pos_w",
             "anchor_object_rel_pos_w",
         )
-        self.reference = {name: self._sample(name, name in quaternion_fields) for name in fields}
+        # Local to this refresh: resets and command advancement can both change
+        # clip_ids/frame within one policy step.
+        indices = motion_interpolation_indices(self.clip_ids, self.frame, self.lengths)
+        self.reference = {
+            name: self._sample(name, name in quaternion_fields, indices=indices) for name in fields
+        }
         self.reference["contact"] = (self.reference["contact"] >= 0.5).float()
-        frame_ids = torch.floor(self.frame).long().clamp_min(0)
-        frame_ids = torch.minimum(frame_ids, self.lengths[self.clip_ids] - 1)
+        frame_ids = indices[0]
         for name in ("release", "release_rising", "release_falling"):
             self.reference[name] = self._batch[name][self.clip_ids, frame_ids]
         for name in ("push_available", "obj_push"):
@@ -354,11 +366,8 @@ class MotionReferenceCommand(CommandTerm):
                 )
             self._hoop_pose_validated = True
 
-    def reset(self, env_ids: Sequence[int] | None = None) -> dict[str, float]:
-        if env_ids is None:
-            env_ids = torch.arange(self.num_envs, device=self.device)
-        elif not isinstance(env_ids, torch.Tensor):
-            env_ids = torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
+    def _collect_episode_metrics(self, env_ids: torch.Tensor) -> dict[str, float]:
+        """Keep the float logging API, transferring all scalar results together."""
         duration = (self._env.episode_length_buf[env_ids].float() * self._env.step_dt).clamp_min(
             self._env.step_dt
         )
@@ -367,38 +376,49 @@ class MotionReferenceCommand(CommandTerm):
             self.last_episode_metrics[name][env_ids] = self.metrics[name][env_ids] / duration
         self.last_episode_clip_ids[env_ids] = self.clip_ids[env_ids]
         extras = {
-            name: value[env_ids].mean().item()
+            name: value[env_ids].mean()
             for name, value in self.last_episode_metrics.items()
         }
-        extras["clip_id_mean"] = self.last_episode_clip_ids[env_ids].float().mean().item()
-        extras["interaction/pickup_count"] = self._pickup_event_count[env_ids].mean().item()
-        extras["interaction/release_count"] = self._release_event_count[env_ids].mean().item()
+        extras["clip_id_mean"] = self.last_episode_clip_ids[env_ids].float().mean()
+        extras["interaction/pickup_count"] = self._pickup_event_count[env_ids].mean()
+        extras["interaction/release_count"] = self._release_event_count[env_ids].mean()
         self._pickup_event_count[env_ids] = 0.0
         self._release_event_count[env_ids] = 0.0
         for phase in self._phase_names:
             phase_duration = self._phase_durations[phase][env_ids]
-            extras[f"phase/{phase}/fraction"] = (phase_duration / duration).mean().item()
-            present = phase_duration > 0.0
+            extras[f"phase/{phase}/fraction"] = (phase_duration / duration).mean()
+            # Resolve the variable-size selection once per phase, preserving
+            # the original reduction order and exclusion of absent episodes.
+            present_ids = (phase_duration > 0.0).nonzero(as_tuple=False).flatten()
             for metric in self._phase_metric_names:
                 key = f"phase/{phase}/{metric}"
                 conditional_mean = self._phase_metric_sums[key][env_ids] / phase_duration.clamp_min(
                     self._env.step_dt
                 )
-                extras[key] = conditional_mean[present].mean().item() if torch.any(present) else 0.0
+                extras[key] = conditional_mean[present_ids].mean() if len(present_ids) else duration.new_zeros(())
                 self._phase_metric_sums[key][env_ids] = 0.0
             self._phase_durations[phase][env_ids] = 0.0
         action_term = self._env.action_manager.get_term("joint_pos")
         for index, name in enumerate(self.dof_names):
             extras[f"control/joint/{name}/residual_scale_rad"] = (
-                action_term.residual_scale[env_ids, index].mean().item()
+                action_term.residual_scale[env_ids, index].mean()
             )
         for metric in self.metrics.values():
             metric[env_ids] = 0.0
         stage_time = self.stage_duration[env_ids]
         total_stage_time = stage_time.sum().clamp_min(self._env.step_dt)
         for index, name in enumerate(("pre_hold", "active", "post_hold")):
-            extras[f"sampling/{name}/fraction"] = (stage_time[:, index].sum() / total_stage_time).item()
+            extras[f"sampling/{name}/fraction"] = stage_time[:, index].sum() / total_stage_time
         self.stage_duration[env_ids] = 0.
+        values = torch.stack(tuple(extras.values())).cpu().tolist()
+        return dict(zip(extras, values))
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> dict[str, float]:
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device)
+        elif not isinstance(env_ids, torch.Tensor):
+            env_ids = torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
+        extras = self._collect_episode_metrics(env_ids)
 
         if self.cfg.randomize_clip:
             sampled_clips = torch.randint(self.num_clips, (len(env_ids),), device=self.device)
