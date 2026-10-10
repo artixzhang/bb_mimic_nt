@@ -151,7 +151,19 @@ class G1ShootStudentPlayEnvCfg(G1ShootStudentEnvCfg):
         self.commands.motion.enable_rsi = False
         self.commands.motion.randomize_clip = False
         self.commands.motion.hold_sampling_weights = None
+        self.commands.motion.reset_dof_pos_noise = 0.0
+        self.commands.motion.reset_dof_vel_noise = 0.0
         self.student_observation.enable_noise = False
         self.student_observation.randomize_delay = False
         for name in ("delay", "ball_mass", "pd_gains", "hand_friction", "foot_friction", "link_mass", "push", "global_push", "object_push"):
             getattr(self.dr, name).enabled = False
+
+    def configure_randomization(self, *, random_init: bool = False, domain_randomization: bool = False) -> None:
+        """Opt into reset noise and full-strength physical DR independently."""
+        training_cfg = G1ShootStudentEnvCfg()
+        for name in ("reset_dof_pos_noise", "reset_dof_vel_noise"):
+            setattr(self.commands.motion, name, getattr(training_cfg.commands.motion, name) if random_init else 0.0)
+        for name in ("delay", "ball_mass", "pd_gains", "hand_friction", "foot_friction", "link_mass", "push", "global_push", "object_push"):
+            schedule = getattr(self.dr, name)
+            schedule.enabled = domain_randomization and getattr(training_cfg.dr, name).enabled
+            schedule.full_strength = domain_randomization

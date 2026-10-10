@@ -38,8 +38,8 @@ from . import mdp
 
 EXTENSION_ROOT = Path(__file__).resolve().parents[4]
 ASSET_ROOT = EXTENSION_ROOT / "assets"
-MOTION_SOURCE = ASSET_ROOT / "trajectory" / "setshot_1008.pkl"
-MOTION_CACHE = ASSET_ROOT / "trajectory" / "setshot_1008_processed.pt"
+MOTION_SOURCE = ASSET_ROOT / "trajectory" / "batch_setshot_1009.pkl"
+MOTION_CACHE = MOTION_SOURCE.with_name(f"{MOTION_SOURCE.stem}_processed.pt")
 ROBOT_URDF = ASSET_ROOT / "robots" / "g1" / "urdf" / "g1_29dof_mode16_bb.urdf"
 
 
@@ -264,7 +264,7 @@ class TerminationsCfg:
     dof_tracking_error = DoneTerm(func=mdp.reference_dof_error, params={"maximum_rmse": 1.0})
     interaction_tracking_error = DoneTerm(
         func=mdp.interaction_tracking_error,
-        params={"maximum_distance": 0.08},
+        params={"maximum_distance": 0.12},
     )
 
 

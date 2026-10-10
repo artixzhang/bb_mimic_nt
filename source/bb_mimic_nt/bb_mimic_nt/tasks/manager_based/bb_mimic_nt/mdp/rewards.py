@@ -27,6 +27,7 @@ from bb_mimic_nt.core import (
 
 from .commands import MotionReferenceCommand
 from .contacts import contact_graph
+from .events import curriculum_strength, training_policy_steps
 
 
 def root_position_reward(actual: torch.Tensor, reference: torch.Tensor, sigma: float) -> torch.Tensor:
@@ -157,9 +158,41 @@ def contact_graph_reward(
 
 
 @configclass
+class ObjectRewardCurriculumCfg:
+    """Smoothly tighten object tracking kernels over training progress."""
+
+    enabled: bool = True
+    start_fraction: float = 0.0
+    end_fraction: float = 0.60
+    full_strength: bool = False
+    # position, direction, speed_magnitude, rotation
+    initial_sigmas: tuple[float, float, float, float] = (8.0, 6.0, 0.5, 1.0)
+    final_sigmas: tuple[float, float, float, float] = (20.0, 10.0, 5.0, 1.0)
+
+
+def object_reward_sigmas(settings, env) -> tuple[tuple[float, ...], float]:
+    """Interpolate to the configured final sigmas with ``3t² - 2t³``."""
+    schedule = settings.object_curriculum
+    if not schedule.enabled:
+        return schedule.final_sigmas, 1.0
+    if len(schedule.initial_sigmas) != 4 or len(schedule.final_sigmas) != 4:
+        raise ValueError("Object reward curriculum requires four initial and final sigmas.")
+    if any(value <= 0.0 for value in (*schedule.initial_sigmas, *schedule.final_sigmas)):
+        raise ValueError("Object reward curriculum sigmas must be positive.")
+    iteration = training_policy_steps(env) / env.cfg.dr.steps_per_iteration
+    strength = curriculum_strength(schedule, iteration, env.cfg.dr.total_iterations)
+    sigmas = tuple(
+        initial + strength * (final - initial)
+        for initial, final in zip(schedule.initial_sigmas, schedule.final_sigmas)
+    )
+    return sigmas, strength
+
+
+@configclass
 class UnifiedRewardCfg:
     # body, obj, relative, contact
-    global_weights: tuple[float, float, float, float] = (0.45, 0.20, 0.20, 0.15)
+    # original (0.45, 0.20, 0.20, 0.15)
+    global_weights: tuple[float, float, float, float] = (0.35, 0.35, 0.15, 0.15)
     # root, joint, link, rotation_only
     body_weights: tuple[float, float, float, float] = (0.30, 0.30, 0.30, 0.10)
     # position, rotation, linear_velocity, angular_velocity
@@ -171,7 +204,7 @@ class UnifiedRewardCfg:
 
     # position, direction, speed_magnitude, rotation
     object_weights: tuple[float, float, float, float] = (0.50, 0.30, 0.2, 0.0)
-    object_sigmas: tuple[float, float, float, float] = (20.0, 10.0, 5.0, 1.0)
+    object_curriculum: ObjectRewardCurriculumCfg = ObjectRewardCurriculumCfg()
     object_free_phase_weight: float = 1.0
     relative_free_phase_weight: float = 0.3
 
@@ -405,18 +438,19 @@ class UnifiedMimicReward(ManagerTermBase):
         )
         body = normalized_weighted_sum((root, joint, link, rotation_only), settings.body_weights)
 
+        object_sigmas, object_curriculum_strength = object_reward_sigmas(settings, env)
         object_parts = {
             "mimic/object/position": object_position_reward(
-                term.ball.data.root_pos_w - origin, reference["object_pos"], settings.object_sigmas[0]
+                term.ball.data.root_pos_w - origin, reference["object_pos"], object_sigmas[0]
             ),
             "mimic/object/direction": object_direction_reward(
-                term.ball.data.root_lin_vel_w, reference["object_lin_vel"], settings.object_sigmas[1]
+                term.ball.data.root_lin_vel_w, reference["object_lin_vel"], object_sigmas[1]
             ),
             "mimic/object/speed": object_speed_reward(
-                term.ball.data.root_lin_vel_w, reference["object_lin_vel"], settings.object_sigmas[2]
+                term.ball.data.root_lin_vel_w, reference["object_lin_vel"], object_sigmas[2]
             ),
             "mimic/object/rotation": object_rotation_reward(
-                term.ball.data.root_quat_w, reference["object_quat"], settings.object_sigmas[3]
+                term.ball.data.root_quat_w, reference["object_quat"], object_sigmas[3]
             ),
         }
         obj = normalized_weighted_sum(tuple(object_parts.values()), settings.object_weights)
@@ -516,6 +550,11 @@ class UnifiedMimicReward(ManagerTermBase):
                 **joint_parts,
                 **link_parts,
                 **object_parts,
+                "object_curriculum/strength": obj.new_full(obj.shape, object_curriculum_strength),
+                **{
+                    f"object_curriculum/sigma_{name}": obj.new_full(obj.shape, sigma)
+                    for name, sigma in zip(("position", "direction", "speed", "rotation"), object_sigmas)
+                },
                 **relative_parts,
                 "mimic/body/root": root,
                 "mimic/body/joint": joint,

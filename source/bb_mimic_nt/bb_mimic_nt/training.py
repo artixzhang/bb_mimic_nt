@@ -3,9 +3,9 @@
 
 """Shared defaults for Teacher PPO, Student DAgger, and environment curricula."""
 
-NUM_ENVS = 16_384  # Per process; shared by Teacher and Student training scenes.
+NUM_ENVS = 8192  # Per process; shared by Teacher and Student training scenes.
 PPO_STEPS_PER_ENV = 48
-PPO_MAX_ITERATIONS = 4_000
+PPO_MAX_ITERATIONS = 7_000
 RSI_DECAY_FRACTION = 0.30
 TOTAL_POLICY_STEPS = PPO_STEPS_PER_ENV * PPO_MAX_ITERATIONS
 RSI_DECAY_STEPS = int(TOTAL_POLICY_STEPS * RSI_DECAY_FRACTION)

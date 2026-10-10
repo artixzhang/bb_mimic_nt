@@ -9,7 +9,7 @@
 - 仿真 / 策略频率：200 Hz / 100 Hz（decimation 2）
 - 动作：29 维 reference-relative PD residual；Gaussian policy 输出经 `tanh` 约束，最终 PD 目标限制在机械关节限位内，再按每环境 0–2 个策略步延迟执行
 - Teacher observation：固定 674 维，包含当前状态、reference pose/velocity/contact、object-control state、历史、phase、reference speed 和 6 维 DR 特权参数
-- 原始轨迹：`source/bb_mimic_nt/assets/trajectory/setshot_1008.pkl`
+- 原始轨迹：`source/bb_mimic_nt/assets/trajectory/batch_setshot_1009.pkl`
 - 预处理缓存：同目录 `setshot_1008_processed.pt`（自动生成并被 Git 忽略）
 - 场景资产配置：`source/bb_mimic_nt/bb_mimic_nt/objects/`；环境直接复用其中的篮球、floating hoop 和地面配置
 
@@ -30,8 +30,8 @@ python scripts/preprocess_trajectory.py
 
 ```bash
 python scripts/preprocess_trajectory.py \
-  --input source/bb_mimic_nt/assets/trajectory/setshot_1008.pkl \
-  --output source/bb_mimic_nt/assets/trajectory/setshot_1008_processed.pt \
+  --input source/bb_mimic_nt/assets/trajectory/batch_setshot.pkl \
+  --output source/bb_mimic_nt/assets/trajectory/batch_setshot_processed.pt \
   --force
 ```
 
@@ -220,6 +220,8 @@ python scripts/rsl_rl/export_student.py \
 
 交互播放支持 `V` reference 点、`,` / `.` 切换 clip、`P` 或空格暂停/恢复、`R` 重启、`--all-clips`、`--ignore-failures` 和 `--no-timeout`。导出目录包含 `student_weights.pt`、TorchScript、ONNX 与 `student_config.json`；配置记录观测顺序/缩放、关节顺序、nominal pose、安全限位、PD 参数和固定标称延迟。成对评估对相同 clip 分别运行 Teacher 与 Student，输出篮球首次触地相对篮筐的水平落点和最高高度。
 
+Student Play 默认关闭 reset 关节位置/速度扰动和域随机化，同一 clip 每次从参考初始状态重启。需要测试扰动时，在 `play_student.py` 命令中添加 `--random-init`（开启训练配置中的 reset 关节噪声）或 `--domain-randomization`（开启完整强度的物理参数随机化、动作延迟采样和推力），两者可独立使用或同时开启。观测噪声仍关闭，观测延迟仍使用导出配置的固定值；RSI 和随机 clip 仍关闭。
+
 Student 真机导出流程、phase/初始化契约、参考观测构造器及 READY 验证见 [部署说明](docs/student_deployment.md)。
 
 ### 从 Teacher rollout 导出训练 motion
@@ -228,14 +230,19 @@ Student 真机导出流程、phase/初始化契约、参考观测构造器及 RE
 python scripts/rsl_rl/record_teacher_motion.py \
   --checkpoint logs/rsl_rl/g1_shoot_teacher_v2/<run>/model_6000.pt \
   --pre_hold 1.0 --post_hold 3.0 \
-  --export_dir outputs/teacher_motion --headless
+  --num_envs 32 --export_dir outputs/teacher_motion --headless
 ```
 
-使用 Isaac Lab 的 Python 环境运行。默认按源数据顺序为每个 clip 录制一次，
-可用 `--clip_ids 0 2` 指定片段。导出文件为 `<export_dir>/teacher_motion.pkl`，
+使用 Isaac Lab 的 Python 环境运行。默认使用最多 32 个环境并行录制，每个环境一次录制一个 clip，
+每批结束后开始下一批；可用 `--num_envs 64` 调整并行数，`--num_envs 1` 使用串行模式，
+实际环境数不超过所选 clip 数。可用 `--clip_ids 0 2` 指定片段，输出始终保持源数据顺序
+（指定 `--clip_ids` 时保持指定顺序，包括重复 ID），不受各片段结束先后影响。
+并行模式保持相同录制规则，但多环境物理仿真可能产生浮点差异，不保证与串行结果逐位相同。
+导出文件为 `<export_dir>/teacher_motion.pkl`，
 与训练源 pkl 一样通过 `joblib.load` 读取为 `list[dict]`，保留所有字段、dtype、
 关节及接触通道顺序。采样率为 100 Hz，包含初始帧与自动 reset 前的终止帧。
-`root_pos/root_rot/dof/obj_pos/obj_rot/contact` 取仿真实测值，位置减去环境原点，
+`root_pos/root_rot/dof/obj_pos/obj_rot` 取仿真实测值，位置减去环境原点，
+`contact` 初始帧沿用源轨迹第一帧 label（reset 后尚无新物理步的接触力），后续帧取仿真实测值。
 四元数为 WXYZ；`hoop_pos_w` 为实际篮圈中心，`release/push_available` 沿用当前参考阶段的语义标注。
 前后 hold 期间仍由 teacher 控制并录制，时长按控制步量化；关闭 RSI、随机 hold 和自适应速度。
 若 rollout 因摔倒等条件提前终止，会报错且不导出该批次。

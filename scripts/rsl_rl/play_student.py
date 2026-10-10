@@ -18,6 +18,11 @@ parser.add_argument("--student-config", type=Path, default=None)
 parser.add_argument("--clip-id", type=int, default=0)
 parser.add_argument("--num-envs", type=int, default=1)
 parser.add_argument("--all-clips", action="store_true")
+parser.add_argument("--random-init", action="store_true", help="Enable reset joint position/velocity noise.")
+parser.add_argument(
+    "--domain-randomization", action="store_true",
+    help="Enable full-strength physical randomization, action-delay sampling, and pushes.",
+)
 parser.add_argument("--real-time", action="store_true")
 parser.add_argument("--ignore-failures", action="store_true")
 parser.add_argument("--no-timeout", action="store_true")
@@ -88,6 +93,9 @@ class StudentKeyboardController:
 def main(env_cfg, _agent_cfg):
     state, metadata = student_read_artifact(args.student_weights, args.student_config)
     student_apply_deployment_config(env_cfg, metadata)
+    env_cfg.configure_randomization(
+        random_init=args.random_init, domain_randomization=args.domain_randomization,
+    )
     if args.pre_hold_s is not None:
         if not math.isfinite(args.pre_hold_s) or args.pre_hold_s < 0:
             raise ValueError("Pre hold duration must be finite and non-negative.")
