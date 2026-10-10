@@ -1,0 +1,48 @@
+command:
+  dimension: 3
+
+defaults:
+
+  end:
+    duration_s: 5.0
+    object_interaction_enabled: false
+
+  initialization:
+    robot: reference
+    ball: reference
+    hoop: reference
+
+  rsi:
+    enabled: true
+
+  object:
+    interaction_enabled: true
+
+skills:
+  hold:
+    command_id: 0
+    sampling_weight: 0.1
+    motion_file: source/bb_mimic_nt/assets/trajectory/batch_hold_1010.pkl
+
+    end:
+      duration_s: [2.0, 5.0]
+      object_interaction_enabled: true
+
+    rsi:
+      enabled: false
+
+  shoot:
+    command_id: 1
+    sampling_weight: 0.7
+    motion_file: source/bb_mimic_nt/assets/trajectory/batch_setshot_1010.pkl
+
+  stand_to_hold:
+    command_id: 2
+    sampling_weight: 0.2
+    motion_file: source/bb_mimic_nt/assets/trajectory/batch_stand_to_hold_1010.pkl
+
+    rsi:
+      enabled: false
+    
+    object:
+      interaction_enabled: false
