@@ -303,7 +303,12 @@ def student_load_policy(weights: Path, config: Path | None, device: str) -> tupl
 
 def student_apply_deployment_config(env_cfg, metadata: dict) -> None:
     if "observation" in metadata:
-        env_cfg.commands.motion.skills_config = student_simulation_skill_config(metadata)
+        motion_cfg = env_cfg.commands.motion
+        simulation_config = getattr(motion_cfg, 'skills_config', None)
+        if simulation_config is None and getattr(motion_cfg, 'skills_path', None):
+            from .skills import load_skill_config
+            simulation_config = load_skill_config(motion_cfg.skills_path)
+        motion_cfg.skills_config = student_simulation_skill_config(metadata, simulation_config)
         delay = student_sensor_delay(metadata)
         env_cfg.student_observation.history_length = metadata["history_length"]
         env_cfg.student_observation.delay_nominal_steps = delay
@@ -363,16 +368,22 @@ def student_validate_deployment(env, metadata: dict) -> None:
         raise ValueError("Student export joint order does not match the environment.")
 
 
-def student_prepare_export_metadata(metadata: dict, provenance: dict | None = None) -> dict:
-    """Project the saved training contract; re-exports already contain this interface."""
+def student_prepare_export_metadata(metadata: dict, provenance: dict | None = None, **startup) -> dict:
+    """Project saved training facts without reading Teacher or reference motion files."""
     if 'deployment_contract' in metadata and provenance is not None:
         provenance.update(metadata['deployment_contract']['provenance'])
-    return compact_student_config(metadata)
+    if 'deployment_contract' in metadata and 'command_dimension' in metadata:
+        expected = [dict(name=name, size=size) for name, size in
+                    student_observation_fields(metadata['history_length'], metadata['command_dimension'])]
+        if metadata.get('observation_fields', expected) != expected:
+            raise ValueError('Checkpoint observation fields differ from the skill-command interface.')
+    return compact_student_config(metadata, **startup)
 
 
 def student_export(
     policy: StudentPolicy, destination: Path, metadata: dict, *,
     source_path: Path | None = None, source_iteration: int | None = None,
+    default_skill: str | None = None, initial_pose=None, initial_clip_index: int | None = None,
 ) -> None:
     # Read the source before writing artifacts, including in-place re-exports.
     source = metadata.get("export_source", metadata.get("_provenance", {}).get("export_source"))
@@ -390,7 +401,8 @@ def student_export(
     for key in ("teacher_checkpoint", "teacher_sha256", "export_source"):
         if metadata.get(key) is not None:
             provenance[key] = metadata[key]
-    metadata = student_prepare_export_metadata(metadata, provenance)
+    metadata = student_prepare_export_metadata(metadata, provenance, default_skill=default_skill,
+                                               initial_pose=initial_pose, initial_clip_index=initial_clip_index)
     if source is not None:
         metadata["export_source"] = source
         provenance["export_source"] = source

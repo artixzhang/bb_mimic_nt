@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import re
 
@@ -43,6 +44,10 @@ def main():
     parser.add_argument('--student-config', type=Path, default=None)
     parser.add_argument('--output', type=Path, default=None, help='Default: outputs/student_<run-time>.')
     parser.add_argument('--logs-dir', type=Path, default=DEFAULT_LOGS, help='Student run directory used for automatic selection.')
+    parser.add_argument('--default-skill', help='Startup skill name; default: hold, or the first configured skill.')
+    pose = parser.add_mutually_exclusive_group()
+    pose.add_argument('--initial-clip-index', type=int, help='Startup pose from this clip within the default skill (zero-based; default: 0).')
+    pose.add_argument('--initial-pose', type=Path, help='JSON array of 29 startup joint angles in radians, in joint_names order.')
     args = parser.parse_args()
     if args.student_config and not args.student_weights:
         parser.error('--student-config applies only to --student-weights')
@@ -63,7 +68,10 @@ def main():
         source_iteration = payload['iteration']
         policy = student_policy_from_state(payload['student'], metadata, 'cpu')
     destination = export_destination(selected, args.output)
-    student_export(policy, destination, metadata, source_path=selected, source_iteration=source_iteration)
+    initial_pose = json.loads(args.initial_pose.read_text()) if args.initial_pose else None
+    student_export(policy, destination, metadata, source_path=selected, source_iteration=source_iteration,
+                   default_skill=args.default_skill, initial_pose=initial_pose,
+                   initial_clip_index=args.initial_clip_index)
     print(f'Student artifacts: {destination.resolve()}')
 
 

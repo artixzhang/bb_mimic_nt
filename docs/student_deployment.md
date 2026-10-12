@@ -4,91 +4,94 @@
 PYTHONPATH=source/bb_mimic_nt python scripts/rsl_rl/export_student.py
 ```
 
-默认选择最新有非空 checkpoint 的时间戳 run，再选择编号最大的 `model_N.pt`，导出到 `outputs/student_<run-time>`。可用 `--checkpoint`、`--student-weights`、`--student-config`、`--output` 覆盖。自动训练导出与独立导出使用同一逻辑。训练进程不会重新加载已编辑的 Python 源码；正在运行的进程结束后可用上述命令重新导出。
+默认选择最新有非空 checkpoint 的时间戳 run，再选择编号最大的 `model_N.pt`，导出到 `outputs/student_<run-time>`。可用 `--checkpoint`、`--student-weights`、`--student-config`、`--output` 覆盖。自动训练导出与独立导出使用同一逻辑。
 
 ## 交付文件
 
-下游部署只需要同一次导出的 `student_config.json` 和 `student_policy.onnx`。JSON 自包含观测、动作、技能选择和初始状态；不需要读取训练目录、Teacher、motion cache 或 manifest。其余文件用于本项目播放、重导出和离线验收。
+真机部署只需要同一次导出的 **student_policy.onnx + student_config.json**。JSON 不再导出 motion profiles、profile IDs、各 clip 的 root/ball/hoop 状态、参考时长或轨迹路径。部署不需要 Teacher、reference motion、skills.yaml 或 manifest。
 
 | 文件 | 用途 |
 | --- | --- |
-| student_policy.pt / student_policy.onnx | 完整推理网络，输入 `[batch, observation_dim]`，输出 `[batch, action_dim]` |
-| student_weights.pt | 原始 Student 权重；网络结构由配置的 hidden dims 和 activation 重建 |
-| student_config.json | 唯一运行配置：关节、观测、动作、技能、初始化，以及 export_source 源文件信息 |
-| verification_vectors.npz | 输入观测及预期未经裁剪的网络输出 |
-| manifest.json | 文件 SHA256、导出来源、Teacher/motion/URDF 追溯及通过的验证项目 |
+| student_policy.onnx | 输入 `[batch, observation_dim]`，输出 `[batch, action_dim]` |
+| student_config.json | 观测与动作接口、关节参数、技能命令、default_skill 和单个 initial_pose |
+| student_policy.pt / student_weights.pt | 本项目 TorchScript 播放和权重重导出 |
+| verification_vectors.npz | 覆盖所有技能 command 的输入与预期网络输出 |
+| manifest.json | 文件 SHA256、来源追溯和离线验证结果 |
 
-部署 JSON 和 manifest 不包含版本标记。输入包含技能 one-hot command，没有 phase 或时间进度输入。训练采样权重、RSI、课程、噪声和 Teacher residual 参数保留在训练 checkpoint/params 中；部署 JSON 保存显式技能选择、初始化 profile 和 end 规则。Teacher/motion/URDF 追溯信息保存在 manifest.provenance。
+`export_source` 记录导出输入文件的 path、file、size_bytes、sha256，以及 checkpoint 的 iteration。路径只用于追溯，部署无需访问它。Teacher、motion 和 URDF 哈希保存在 manifest.provenance。
 
-`student_config.json` 的 `export_source` 记录本次导出输入文件的 `path`（导出时的绝对路径）、`file`（文件名）、`size_bytes` 和 `sha256`；从 checkpoint 导出时还记录 `iteration`。训练结束自动导出使用最后保存的 checkpoint，`--student-weights` 重导出使用实际输入的权重文件，不沿用旧 checkpoint 的哈希。相同信息同步写入 `manifest.provenance.export_source`。路径仅供追溯，部署时无需访问训练机器或复制 checkpoint；导出产物本身的 SHA256 仍由 `manifest.artifacts_sha256` 记录。底层 Python API 未传入源文件时只保留已有来源信息，不推测缺失的路径或哈希。
+从 checkpoint 导出时，仅从其归档元数据读取技能和启动关节角；不打开轨迹文件，也不读取当前 skills.yaml。早期多技能 checkpoint 即使缺少 hoop 初值、参考时长等字段也能导出。旧 phase 输入模型不能通过修改 JSON 转成 command 输入模型，必须使用多技能训练权重。
 
-从 checkpoint 导出时，读取其 `deployment_contract` 保存的技能定义与初始状态，并使用各技能归档的 `motion_file` 提取篮筐柱坐标；技能内索引与参考时长在导出阶段计算。不会读取本地最新 skills.yaml，也没有旧 metadata 的恢复分支。当前多技能 checkpoint 无需重新训练即可导出；导出时需要其技能轨迹源文件。重导出当前产物无需访问 Teacher 或轨迹源文件。
+## 默认技能和启动姿态
 
-## JSON 字段与单位
+- `default_skill`：启动时执行的技能名称，默认 `hold`；没有 hold 时选择配置中的第一个技能。
+- `initial_pose`：唯一一组启动关节角，29 个 rad 数值，严格按 `joint_names` 排列。默认取 default_skill 的第一个 clip 的第一帧。
+- `nominal_joint_position`：网络输入/输出 offset 的坐标原点，与 initial_pose 含义不同。
 
-`model.file` 为 ONNX 文件名；`model.input` / `model.output` 定义输入输出的 name、dtype 和 shape。shape 的首项 `null` 表示动态 batch。下游按配置中的 name 绑定 ONNX 输入输出。
+硬件启动控制器先把关节移到 initial_pose，再开始持续运行 policy，初始 command 选择 default_skill。移动到启动姿态的轨迹及速度由硬件控制器负责。不要把网络输出直接加到 initial_pose。
 
-顶层 `policy_hz` 是策略频率；所有 delay_steps 的单位都是策略 tick。周期由 `1 / policy_hz` 得到。`observation_dim`、`action_dim` 是单个样本的维数；`history_length` 是每种历史观测的帧数。
+可以覆盖默认技能、技能内 clip 索引，或直接指定姿态：
 
-所有 29 元素关节数组都严格遵循 `joint_names` 的顺序：
+```bash
+# 取 shoot 技能第 2 个 clip 的首帧；索引从 0 开始
+PYTHONPATH=source/bb_mimic_nt python scripts/rsl_rl/export_student.py \
+  --default-skill shoot --initial-clip-index 1
 
-- `nominal_joint_position`：offset 的坐标原点，rad；不是投篮准备姿态。
-- `safe_lower_joint_position` / `safe_upper_joint_position`：最终 position target 的安全边界，rad，已包含训练使用的位置 margin。
-- `pd_stiffness`：Kp，N·m/rad；`pd_damping`：Kd，N·m·s/rad。仿真使用 implicit position actuator，硬件须匹配位置控制与 gain 约定。
-- `student_hidden_dims` / `activation`：用于从 student_weights.pt 重建网络；TorchScript/ONNX 内已包含结构。
+# pose.json 是按 joint_names 顺序排列的 29 元素弧度制 JSON 数组
+PYTHONPATH=source/bb_mimic_nt python scripts/rsl_rl/export_student.py \
+  --default-skill hold --initial-pose pose.json
+```
 
-`observation.fields` 是输入的唯一布局定义。每项含 `name`、`start`、`stop`、`frame_size`、`history_length`、`unit`、`scale`、`source`。`frame_size` 是每帧元素数，字段自己的 `history_length` 对 command 和 hoop 为 1、对历史字段为顶层 history_length。`[start:stop]` 为零基、stop 不含在内的切片；unit 是乘 scale **之前**的物理单位，实际输入为 `raw_value * scale`。下游据此拼接输入；导出不提供配置修复或兼容层。
+两个姿态覆盖选项互斥。重导出精简后的权重包时默认保留其 default_skill 和 initial_pose；因为包中已经没有其他 clip 的姿态，更换默认技能时需同时传入 `--initial-pose`，或改用训练 checkpoint 导出。初始姿态只是启动目标，不在运行中自动反复应用。
+
+## 观测接口
+
+`model.input` / `model.output` 定义 ONNX 的 name、dtype 和 shape；首项 `null` 表示动态 batch。顶层 `policy_hz` 是策略频率，delay_steps 的单位均为策略 tick。
+
+`observation.fields` 定义输入布局。每项的 `[start:stop]` 是零基且右开切片；`frame_size` 是每帧元素数，`history_length` 是该字段的帧数；`unit` 是缩放前的单位，输入为 `raw_value * scale`。
 
 | 字段 | 单帧维数 | 原始值 |
 | --- | --- | --- |
-| skill_command | command_dimension | one_hot(command_id, command_dimension)，无量纲，整个 episode 固定 |
-| projected_gravity_history | 3 | pelvis/root_link 坐标系的重力方向，xyz，无量纲；`R.T @ [0,0,-1]` |
-| pelvis_angular_velocity_history | 3 | pelvis/root_link 坐标系 gyro，xyz，rad/s |
+| skill_command | command_dimension | one_hot(command_id, command_dimension)，由运行端选择 |
+| projected_gravity_history | 3 | pelvis/root_link 系重力方向 xyz，`R.T @ [0,0,-1]` |
+| pelvis_angular_velocity_history | 3 | pelvis/root_link 系角速度 xyz，rad/s |
 | joint_position_offset_history | 29 | 实测 q − nominal，rad |
 | joint_velocity_history | 29 | 实测 qdot，rad/s |
 | applied_action_offset_history | 29 | 已实际生效的 PD target − nominal，rad |
-| hoop_pos_cyl | 3 | 轨迹中的篮筐柱坐标 [r, theta, z]，单位 [m, rad, m]；reset 时读取，随后冻结 |
+| hoop_pos_cyl | 3 | 外部篮筐参数 `[r, theta, z]`，单位 `[m, rad, m]` |
 
-输入采用 field-major：先拼完某一种 history 的所有帧，再拼下一种 history。每种 history 为 oldest-to-newest，每帧内部是 xyz 或 joint_names 顺序。history_length=5 时维数为 471（`93 * history_length + 3 + command_dimension`）。只有 sensor histories（gravity/gyro/q/qdot）应用 `observation.sensor_delay_steps`；skill command 和 action history 不额外应用传感器延迟。action history 中的 target 本身已经经过 action delay。
+历史按 field-major 拼接：先拼完一种观测的所有帧，再拼下一种。每种历史为 oldest-to-newest，每帧按 xyz 或 joint_names 顺序。输入维数为 `93 * history_length + 3 + command_dimension`；5 帧历史、3 维 command 时为 471。输入没有 phase、参考帧或时间进度。
 
-篮筐观测按 `[r_scale, theta_scale, z_scale]` 分量缩放：训练配置 `student_observation.scales.hoop_position=0.25` 用于 r、z，`student_observation.scales.hoop_theta=2.0` 单独用于弧度制 theta（不是额外乘数）。导出配置的 `hoop_pos_cyl` 字段 `scale` 保存为 `[0.25, 2.0, 0.25]`，部署端逐分量相乘。
+只有 gravity/gyro/q/qdot 的 sensor histories 应用 `observation.sensor_delay_steps`；command、hoop 和 action history 不额外应用传感器延迟。action history 中的 target 本身已经经过 action delay。
 
-没有 running normalization、输入 clip 或部署人工噪声。机器人 IMU 需转换到 pelvis/root_link 坐标系；重力输入是方向，不能直接输入 9.81 m/s² 加速度。
+hoop 是外部观测参数，不是 ONNX 常量，也不在 JSON 中保存固定坐标。按与训练轨迹 hoop_pos_cyl 相同的坐标约定传入，不额外进行 pelvis 坐标变换。各分量缩放来自字段 scale，例如 `[0.25, 2.0, 0.25]`，theta 的 2.0 是单独的弧度缩放，不再乘 0.25。
 
-## Action 与历史初始化
+没有 running normalization、输入 clip 或部署噪声。IMU 数据需转换到 pelvis/root_link 坐标系；重力输入是方向，不能直接使用 9.81 m/s² 加速度。
 
-Student 网络直接输出 29 维 nominal-relative position offset，单位 rad。没有输出 tanh、额外 scale、Teacher reference 相加或 smoothing。执行转换在网络外：
+## 动作和历史
+
+Student 输出 29 维 nominal-relative position offset，单位 rad。没有额外 tanh、scale、reference 相加或 smoothing。网络外转换为：
 
 ```python
 target = clip(nominal_joint_position + network_output,
               safe_lower_joint_position, safe_upper_joint_position)
 ```
 
-之后按照 `action.delay_steps` 处理总执行延迟。position clip 不根据 effort/velocity limit 计算；这些限制由执行器单独处理。下一 tick 的 action history 填实际已生效的 PD target，不填最新网络预测或实测关节角。延迟队列在启动时应填实际初始 PD target。
+所有关节数组遵循 joint_names。pd_stiffness 为 Kp（N·m/rad），pd_damping 为 Kd（N·m·s/rad）；位置限位已包含训练使用的 margin。
 
-初始化时由硬件启动控制器进入所选 motion profile 的姿态和持球条件。名义初始 PD target 可由 `clip(initial_joint_position_rad, lower, upper)` 得到，无需另存重复的 target 或 offset 数组。
+转换后匹配 `action.delay_steps` 的执行延迟。下一 tick 的 action history 填实际已生效的 PD target，不填尚未生效的预测或实测关节角。延迟队列初值是实际启动 PD target。
 
-随后读取真实首帧 gravity/gyro/q/qdot 和实际初始 PD target；传感器历史及其 delay padding 全部重复这一首帧样本，action history 全部重复 `实际初始target - nominal`。首帧 qdot 也使用实测值，不统一填零。训练 reset 的 q/qdot 可以带扰动，测量 q 与 PD target 不要求相同。
+启动时只 reset 一次：传感器历史和延迟 padding 重复第一帧实测 gravity/gyro/q-minus-nominal/qdot；动作历史重复实际启动 target-minus-nominal。qdot 不强制清零。切换技能和更新篮筐参数不 reset 历史，也不停止网络推理。
 
-使用所选 profile 的 `initial_hoop_pos_cyl = [r, theta, z]`（单位 [m, rad, m]），不进行 pelvis 坐标变换；每个 episode reset 时读取一次。若下游改变篮筐条件，应传入相同坐标约定下的新值。
+## 持续运行与多次投篮
 
-## 技能 command 和运行顺序
+`skills.command.labels` 按 one-hot 下标记录技能名，空缺下标为 null；valid_ids 是可用 ID。每个 definition 提供 name、command_id 和 command_one_hot。command ID 是 one-hot 下标，不是列表索引或 clip ID。参考 builder 拒绝未知 ID。
 
-`skills.command` 定义统一的技能输入：`dimension` 与顶层 `command_dimension` 相同，`encoding=one_hot`、`selection=explicit_command_id`、`lifetime=episode`、`switching=reset_required`。将所选技能的 `command_id` 位置设为 1，其余位置为 0；ID 是 one-hot 下标，不是技能列表索引，也不是 clip ID。ID 可以不连续，未配置的下标保持为 0，不能作为可选技能。当前配置的映射为：
+definitions 还保留 skills.yaml 中的 object 和 end 设置，便于对照训练。这些交互掩码、末帧保持时长和触发概率不会在部署端自动触发动作，不作为抓球、释放、切换技能或计时的控制指令。
 
-| 技能名 | command_id | one-hot |
-| --- | --- | --- |
-| hold | 0 | [1, 0, 0] |
-| shoot | 1 | [0, 1, 0] |
-| stand_to_hold | 2 | [0, 0, 1] |
+运行端可以持续执行 `hold → shoot → hold → 更新篮筐 → shoot`。技能切换和篮筐更新在下一次新 tick 的观测中生效，历史连续保留。投篮期间保持篮筐参数不变；何时恢复 hold、何时开始下一次 shoot 由外部控制器决定。
 
-`skills.definitions` 保存每个技能的 `name`、`command_id`、`motion_profile_ids`、`initialization`、`object`、`end` 和 `motion_file`。下游通过技能名或 command_id 选择 definition，再从该 definition 的 motion_profile_ids 选择启动 profile。`motion_file` 是仿真重放使用的轨迹来源路径，仅供本地播放和追溯；ONNX 部署无需访问它。训练混合权重不用于部署自动调度，也不进入 JSON。仿真播放从这些定义构建均等权重、关闭 RSI 的配置，并按显式选定的 clip 播放。
-
-`skills.motion_profiles` 保存每个 clip 的全局 `clip_id`、技能内 `skill_clip_id`、`command_id`、`frame_count`、`reference_fps`、`reference_duration_s` 和初始关节/root/ball/hoop 条件。`motion_profile_ids` 引用全局 clip_id；同一技能可以有多个 profile，它们使用同一个 command_id。`reference_duration_s = (frame_count - 1) / reference_fps`，支持参考时长为 0 的单帧持姿技能。root/ball 位置以训练场景原点为参考，root quaternion 使用 WXYZ；hoop 使用原轨迹中的柱坐标。
-
-`skills.execution` 描述运行规则。参考运动速度为 1；每 episode 按技能的 `end.trigger_probability` 独立进行 Bernoulli 抽样，选中后从 `end.duration_s=[min,max]` 均匀采样并保持最后参考帧，未选中在参考运动完成后结束。执行计时由外部控制器管理。`object.interaction_enabled` 和 `end.object_interaction_enabled` 是训练中的奖励及终止条件掩码：全局开关为 false 时整个 episode 关闭对应交互条件；全局开启时，end 开关决定末帧保持期间是否继续启用。它们不是球抓取/释放的执行器命令，初始持球条件由 profile.initial_ball_controlled 描述。
-
-部署初始化时选定技能与 profile，并调用 `state.reset()`。每个策略 tick 传入同一个 command_id，构造观测、推理并提交 target。输入没有时间进度；reference 帧数和末帧保持时间用于仿真 episode 管理。部署运行时长由外部控制器管理，不在策略输入中添加计时量。当前训练不串接技能；更换技能时需要重新初始化并 reset 历史。
+下面只展示观测和推理调用；实际机器人测量、启动动作及 target 提交由硬件 adapter 实现：
 
 ```python
 import json
@@ -97,29 +100,38 @@ from bb_mimic_nt.student_deployment import StudentObservationState
 
 cfg = json.load(open('student_config.json'))
 model = ort.InferenceSession(cfg['model']['file'], providers=['CPUExecutionProvider'])
-skill = next(s for s in cfg['skills']['definitions'] if s['name'] == 'shoot')
-profile_id = skill['motion_profile_ids'][0]
-profile = next(p for p in cfg['skills']['motion_profiles'] if p['clip_id'] == profile_id)
-command_id = skill['command_id']
+command_ids = {s['name']: s['command_id'] for s in cfg['skills']['definitions']}
 state = StudentObservationState(cfg)
-state.reset(gravity, gyro, q, qdot, applied_pd_target, profile['initial_hoop_pos_cyl'])
-# 每一 tick，adapter 提供校准后的传感器和实际已生效的命令：
-obs = state.observe(tick, command_id, gravity, gyro, q, qdot, applied_pd_target)
-output = model.run([cfg['model']['output']['name']],
-                   {cfg['model']['input']['name']: obs.numpy()})[0]
-target = state.action_target(output[0])
-# 硬件 adapter 提交 target，并记录/读取实际生效命令。
+# 启动控制器先到 cfg['initial_pose']，读取传感器和实际生效 target。
+state.reset(gravity, gyro, q, qdot, applied_pd_target, hoop_pos_cyl)
+
+# 第一个 tick 传 None，使用 cfg['default_skill']；之后 None 保持上一 command。
+command_id = None
+for tick in range(num_ticks):
+    # 外部控制器可在 tick 边界修改 command_id 和 hoop_pos_cyl。
+    # 如 command_id = command_ids['shoot']；两次投篮之间修改 hoop_pos_cyl。
+    # 每个 tick 都先获取新的传感器测量和实际已生效 target。
+    obs = state.observe(tick, command_id, gravity, gyro, q, qdot,
+                        applied_pd_target, hoop_pos_cyl=hoop_pos_cyl)
+    output = model.run([cfg['model']['output']['name']],
+                       {cfg['model']['input']['name']: obs.numpy()})[0]
+    target = state.action_target(output[0])
+    # 提交 target，并在后续 tick 读取实际已生效的命令。
 ```
 
-参考 builder 假设接收无延迟原始采样；若硬件采样已有延迟，通过 `sensor_delay_steps` 参数选择需要补充的延迟，使总延迟匹配配置。action.delay_steps 同样是总延迟假设，硬件已有的延迟不要重复施加。joint index/sign/zero、IMU 安装旋转、实际命令延迟及 motor limits 由硬件 adapter 标定；启动、watchdog、fallback 和急停属于硬件控制器。
+`observe(..., hoop_pos_cyl=None)` 保持上次篮筐参数。同一 tick 重复调用返回缓存，不再推进历史或应用新的参数；更新应在下一个 tick 提交。
+
+接口允许持续切换，但现有训练仍按 episode 固定 command 和 hoop，没有连续多次投篮的验证结论。投篮间更新避免了投篮中条件突变，但 hold/shoot 切换后的状态分布和连续执行表现仍需单独验证；本次调整没有修改训练观测或网络权重。
+
+硬件本身已有的观测/动作延迟不应重复施加。传感器延迟可通过 StudentObservationState 的 sensor_delay_steps 参数覆盖，匹配训练使用的总延迟。
 
 ## 验收
 
-导出检查 ONNX 结构、TorchScript/ONNX ReferenceEvaluator 与 PyTorch 输出一致性；安装 onnxruntime 后还检查该后端。manifest 中明确记录实际通过的项目。
+导出检查 ONNX 结构、TorchScript 和 ONNX ReferenceEvaluator 与 PyTorch 的数值一致性；安装 onnxruntime 后也会验证该后端。manifest 记录实际通过的项目。
 
 ```bash
-python scripts/verify_student_bundle.py outputs/student_2026-09-30_13-23-24 --backend torchscript
-python scripts/verify_student_bundle.py outputs/student_2026-09-30_13-23-24 --backend onnxruntime
+python scripts/verify_student_bundle.py outputs/student_2026-10-12_11-32-11 --backend torchscript
+python scripts/verify_student_bundle.py outputs/student_2026-10-12_11-32-11 --backend onnxruntime
 ```
 
-校验脚本检查包哈希、输入输出维数及实际后端的 verification_vectors；验收输入覆盖所有已配置技能的有效 one-hot。离线验收不等于真机稳定性验证。仿真持球评估应选择 hold 技能对应的 clip。
+仿真播放需要参考轨迹，由本地环境的 skills_config 或 skills_path 提供；技能名和 command ID 必须与导出包匹配。仿真使用这些本地轨迹进行 reset 和评估，不把这些需求带入真机配置。

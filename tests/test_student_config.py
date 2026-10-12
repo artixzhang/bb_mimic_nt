@@ -1,4 +1,4 @@
-"""Deployment command/profile mapping and sensor/action semantics."""
+"""Deployment startup/command mapping and sensor/action semantics."""
 from types import SimpleNamespace
 
 import pytest
@@ -87,18 +87,16 @@ def test_multi_skill_contract_is_self_contained(training_metadata):
         input=dict(name='student_observation', dtype='float32', shape=[None, 471]),
         output=dict(name='joint_position_offset', dtype='float32', shape=[None, 29]))
     skills = config['skills']
-    assert skills['command'] == dict(dimension=3, encoding='one_hot', selection='explicit_command_id',
-                                     lifetime='episode', switching='reset_required')
-    assert [(skill['name'], skill['command_id'], skill['motion_profile_ids']) for skill in skills['definitions']] == [
-        ('hold', 0, [0]), ('shoot', 1, [1, 2]), ('stand_to_hold', 2, [3])]
-    assert all(not {'sampling_weight', 'rsi'} & skill.keys() for skill in skills['definitions'])
-    profiles = skills['motion_profiles']
-    assert [p['command_id'] for p in profiles] == [0, 1, 1, 2]
-    assert [p['skill_clip_id'] for p in profiles] == [0, 0, 1, 0]
-    assert [p['reference_duration_s'] for p in profiles] == pytest.approx([0., 1.65, .65, .99])
-    for i, profile in enumerate(profiles):
-        assert profile['initial_joint_position_rad'] == [float(i)] * 29
-        assert profile['initial_hoop_pos_cyl'] == pytest.approx([4., -.7, 3.05])
+    assert skills['command'] == dict(dimension=3, encoding='one_hot',
+                                     switching='runtime_preserve_history',
+                                     labels=['hold', 'shoot', 'stand_to_hold'], valid_ids=[0, 1, 2])
+    assert [(skill['name'], skill['command_id']) for skill in skills['definitions']] == [
+        ('hold', 0), ('shoot', 1), ('stand_to_hold', 2)]
+    assert all(not {'sampling_weight', 'rsi', 'motion_file', 'motion_profile_ids', 'initialization'} & skill.keys()
+               for skill in skills['definitions'])
+    assert 'motion_profiles' not in skills and 'execution' not in skills
+    assert config['default_skill'] == 'hold'
+    assert config['initial_pose'] == [0.] * 29
     fields = config['observation']['fields']
     assert [(f['start'], f['stop']) for f in fields] == [
         (0, 3), (3, 18), (18, 33), (33, 178), (178, 323), (323, 468), (468, 471)]
@@ -122,11 +120,14 @@ def test_sparse_command_ids_keep_their_one_hot_indices(training_metadata):
     for profile, command_id in zip(skills['motion_profiles'], [0, 2, 2, 4]):
         profile['command_id'] = command_id
     config = compact_student_config(training_metadata)
-    assert config['skills']['definitions'][1]['motion_profile_ids'] == [1, 2]
+    assert config['skills']['command']['labels'] == ['hold', None, 'shoot', None, 'stand_to_hold']
+    assert config['skills']['command']['valid_ids'] == [0, 2, 4]
+    assert config['skills']['definitions'][1]['command_one_hot'] == [0., 0., 1., 0., 0.]
     state = StudentObservationState(config)
-    profile = config['skills']['motion_profiles'][3]
     state.reset([0., 0., -1.], [0.] * 3, [0.] * 29, [0.] * 29, [0.] * 29,
-                profile['initial_hoop_pos_cyl'])
+                [4., -.7, 3.05])
+    with pytest.raises(ValueError, match='Invalid skill command'):
+        state.observe(0, 1, None, None, None, None, None)
     obs = state.observe(0, 4, [0., 0., -1.], [0.] * 3, [0.] * 29, [0.] * 29, [0.] * 29)
     assert obs.shape == (1, 473)
     assert obs[0, :5].tolist() == [0., 0., 0., 0., 1.]
@@ -199,3 +200,80 @@ def test_export_projects_saved_contract_without_reloading_training_sources(train
                               robot_urdf_sha256='urdf-hash')
     assert 'provenance' not in config and 'teacher_checkpoint' not in config
     assert compact_student_config(config) == config
+
+
+def test_early_multiskill_checkpoint_needs_no_motion_files(training_metadata):
+    import copy
+    pytest.importorskip('rsl_rl')
+    from bb_mimic_nt.student_runtime import student_prepare_export_metadata
+    expected = compact_student_config(training_metadata)
+    contract = training_metadata['deployment_contract']
+    for skill in contract['skills']['config']['skills']:
+        skill['motion_file'] = '/unavailable/motion.pkl'
+    for profile in contract['skills']['motion_profiles']:
+        for key in ('skill_clip_id', 'reference_duration_s', 'initial_hoop_pos_cyl'):
+            del profile[key]
+    before = copy.deepcopy(training_metadata)
+    assert student_prepare_export_metadata(training_metadata) == expected
+    assert training_metadata == before
+
+
+def test_startup_overrides_and_reexport(training_metadata):
+    config = compact_student_config(training_metadata, default_skill='shoot')
+    assert config['initial_pose'] == [1.] * 29
+    assert config['default_skill'] == 'shoot'
+    assert compact_student_config(config) == config
+    config = compact_student_config(training_metadata, default_skill='shoot', initial_clip_index=1)
+    assert config['initial_pose'] == [2.] * 29
+    assert compact_student_config(config) == config
+    overridden = compact_student_config(config, default_skill='hold', initial_pose=[.5] * 29)
+    assert overridden['default_skill'] == 'hold' and overridden['initial_pose'] == [.5] * 29
+    with pytest.raises(ValueError, match='Startup pose unavailable'):
+        compact_student_config(config, default_skill='hold')
+    for kwargs in (dict(default_skill='missing'), dict(initial_pose=[0.] * 28),
+                   dict(initial_pose=[float('nan')] * 29), dict(initial_clip_index=-1),
+                   dict(initial_clip_index=99), dict(initial_clip_index=0, initial_pose=[0.] * 29)):
+        with pytest.raises(ValueError):
+            compact_student_config(training_metadata, **kwargs)
+
+
+def test_old_export_compacts_to_single_startup_pose(training_metadata):
+    config = compact_student_config(training_metadata)
+    old = dict(config)
+    del old['initial_pose'], old['default_skill']
+    old['skills'] = dict(config['skills'], motion_profiles=training_metadata['deployment_contract']['skills']['motion_profiles'])
+    assert compact_student_config(old) == config
+
+
+@pytest.mark.parametrize('corruption', ['dimension', 'layout', 'duplicate', 'pose', 'command_dimension'])
+def test_reexport_rejects_inconsistent_contract(training_metadata, corruption):
+    config = compact_student_config(training_metadata)
+    if corruption == 'dimension':
+        config['observation_dim'] -= 1
+    elif corruption == 'layout':
+        config['observation']['fields'][0]['name'] = 'phase'
+    elif corruption == 'duplicate':
+        config['skills']['definitions'][1]['command_id'] = 0
+    elif corruption == 'command_dimension':
+        config['skills']['command']['dimension'] += 1
+    else:
+        config['initial_pose'] = [0.] * 28
+    with pytest.raises(ValueError):
+        compact_student_config(config)
+
+
+def test_phase_checkpoint_cannot_be_relabelled_as_commands():
+    with pytest.raises(ValueError, match='phase-based'):
+        compact_student_config(dict(observation_dim=469))
+
+
+def test_simulation_references_are_supplied_separately(training_metadata):
+    import copy
+    config = compact_student_config(training_metadata)
+    local = copy.deepcopy(training_metadata['deployment_contract']['skills']['config'])
+    local['skills'][0]['motion_file'] = '/local/simulation/hold.pkl'
+    restored = student_simulation_skill_config(config, local)
+    assert restored['skills'][0]['motion_file'] == '/local/simulation/hold.pkl'
+    local['skills'][0]['command_id'] = 9
+    with pytest.raises(ValueError, match='Simulation skills'):
+        student_simulation_skill_config(config, local)

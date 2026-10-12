@@ -74,8 +74,9 @@ def test_student_deployment_and_torchscript_roundtrip(tmp_path, history, stale_s
     assert manifest['provenance']['export_source'] == deployment['export_source']
     assert not (tmp_path / 'deployment_config.json').exists()
     assert 'format' not in deployment and 'schema' not in manifest
-    profile = deployment['skills']['motion_profiles'][1]
-    assert profile['reference_fps'] / deployment['policy_hz'] / (profile['frame_count'] - 1) == pytest.approx(1 / 165)
+    assert deployment['default_skill'] == 'hold'
+    assert deployment['initial_pose'] == [0.] * 29
+    assert 'motion_profiles' not in deployment['skills']
     assert not {'deployment_contract', 'observation_settings', 'training_observation_settings',
                 'action_adapter', 'teacher_checkpoint'} & deployment.keys()
     cfg = SimpleNamespace(student_observation=SimpleNamespace(scales=SimpleNamespace()),
