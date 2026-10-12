@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-10-11 — End 保持段概率采样
+
+- 新增逐技能 `end.trigger_probability`，默认 0.3；选中后完整执行 end 时长，未选中在 reference 结束后终止。hold 配置保持概率为 1，Teacher/Student/Play 使用同一规则。
+- 新增 end 触发率和每回合实际 end 时长日志；保留动态/保持时间占比，便于核对有效训练样本分配。
+- 修复 CommandManager 深拷贝配置导致训练归档中 `skills_config` 为空的问题，保存解析后的技能配置供 Student 继承与复现。
+
+## 2026-10-10 — 独立多技能混合训练
+
+- Teacher/Student 共享 `skills.yaml`，按 episode 权重选技能、技能内均匀选轨迹；每个 episode 独立完成一个技能。
+- 观测改为技能 one-hot command，默认 Teacher 676 维、Student 471 维；结束保持使用逐技能时长和交互奖励开关，支持单帧持姿轨迹。
+- Student 蒸馏继承技能配置并使用逐技能 RSI；部署接口升级为 v3。新实验目录为 `g1_shoot_teacher_v3` 和 `g1_shoot_student_dagger_v3`，旧模型需要重新训练。
+
 - 轨迹缓存增加独立二值 `release` 状态：0=持球、1=释放，上升沿为释放、下降沿为拿球；旧数据回退到“无双手 contact”。自由球阶段弱化 object reward 并关闭 hand-ball relative reward，新增按控制阶段与逐关节诊断日志。
 - 腾空高度约束由脚部单项改为脚部与 root 各 0.5 权重；root 短缺仅在参考双脚同时离地时触发，防止通过收腿代替整体起跳。
 - Teacher residual action 改为精确关节名到最大残差的映射，对髋/腰偏航和双臂分别限幅；Student DAgger、评估与导出同步继承该映射。

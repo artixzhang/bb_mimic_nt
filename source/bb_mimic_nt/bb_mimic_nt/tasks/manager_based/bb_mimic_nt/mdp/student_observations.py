@@ -25,7 +25,7 @@ class StudentObservation(ManagerTermBase):
             settings.delay_nominal_steps, settings.delay_min_steps, settings.delay_max_steps
         )
         self.history_length = settings.history_length
-        self.observation_dim = sum(size for _, size in student_observation_fields(self.history_length))
+        self.observation_dim = sum(size for _, size in student_observation_fields(self.history_length, env.command_manager.get_term("motion").command_dimension))
         count = env.num_envs
         sensor_slots = maximum_delay + self.history_length
         self._sensor = torch.zeros((sensor_slots, count, self._SENSOR_DIM), device=env.device)
@@ -128,7 +128,7 @@ class StudentObservation(ManagerTermBase):
         scales = settings.scales
         observation = torch.cat(
             (
-                motion.normalized_phase[:, None] * scales.phase,
+                motion.command,
                 sensor_frames[:, :, :3].flatten(1) * scales.gravity,
                 sensor_frames[:, :, 3:6].flatten(1) * scales.angular_velocity,
                 sensor_frames[:, :, 6:35].flatten(1) * scales.joint_position,

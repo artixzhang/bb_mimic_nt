@@ -41,6 +41,8 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import bb_mimic_nt.tasks  # noqa: F401
 from bb_mimic_nt.student import StudentReplay, student_execution_probability, student_mix_actions, student_teacher_target
+from bb_mimic_nt.training import configure_training_curricula
+from bb_mimic_nt.tasks.manager_based.bb_mimic_nt.mdp.curriculums import rsi_schedule
 from bb_mimic_nt.student_runtime import (
     StudentPolicy,
     student_apply_teacher_config,
@@ -88,8 +90,7 @@ def main(env_cfg, agent_cfg):
         raise ValueError("Recent replay storage fraction must be in (0, 1).")
     if not 0.0 <= agent_cfg.replay_recent_sample_fraction <= 1.0:
         raise ValueError("Recent replay sample fraction must be in [0, 1].")
-    env_cfg.dr.total_iterations = agent_cfg.max_iterations
-    env_cfg.dr.steps_per_iteration = agent_cfg.num_steps_per_env
+    configure_training_curricula(env_cfg, agent_cfg.max_iterations, agent_cfg.num_steps_per_env)
     env_cfg.seed = agent_cfg.seed
     if args.device is not None:
         env_cfg.sim.device = args.device
@@ -146,6 +147,9 @@ def main(env_cfg, agent_cfg):
             start_iteration = int(state["iteration"])
             export_checkpoint = args.resume_checkpoint
             export_iteration = start_iteration
+            configure_training_curricula(
+                base.cfg, agent_cfg.max_iterations, agent_cfg.num_steps_per_env, motion_cfg=motion.cfg,
+            )
             base.dr_context.iteration_offset = start_iteration
             base.reset()
             observations = env.get_observations()
@@ -238,6 +242,7 @@ def main(env_cfg, agent_cfg):
                 writer.add_scalar("DAgger/failure_fraction", failure_count / completed_count, iteration)
                 writer.add_scalar("DAgger/mean_episode_steps", completed_steps / completed_count, iteration)
             writer.add_scalar("DAgger/sensor_curriculum_strength", base.student_observation.curriculum_strength, iteration)
+            writer.add_scalar("Curriculum/rsi/probability", rsi_schedule(base)["probability"], iteration)
             writer.add_scalar("DAgger/replay_size", replay.size, iteration)
             writer.add_scalar("DAgger/replay_recent_size", replay.recent_size, iteration)
             writer.add_scalar("DAgger/replay_history_size", replay.history_size, iteration)

@@ -38,7 +38,7 @@ def make_sensor(nominal=1, maximum=3, count=2, history=5):
                                gravity_noise_std=.015, angular_velocity_noise_std=.05,
                                joint_position_noise_std=.01, joint_velocity_noise_std=.1,
                                enabled=True, start_fraction=0., end_fraction=.3, full_strength=True,
-                               scales=SimpleNamespace(phase=1., gravity=1., angular_velocity=1.,
+                               scales=SimpleNamespace(gravity=1., angular_velocity=1.,
                                                       joint_position=1., joint_velocity=1.,
                                                       applied_action=1., hoop_position=1., hoop_theta=1.))
     data = SimpleNamespace(projected_gravity_b=torch.zeros(count, 3),
@@ -46,7 +46,7 @@ def make_sensor(nominal=1, maximum=3, count=2, history=5):
                            root_link_ang_vel_w=torch.zeros(count, 3), root_link_pos_w=torch.zeros(count, 3),
                            joint_pos=torch.zeros(count, 29), joint_vel=torch.zeros(count, 29))
     motion = SimpleNamespace(robot=SimpleNamespace(data=data), joint_ids=list(range(29)),
-                             normalized_phase=torch.zeros(count),
+                             command_dimension=3, command=torch.tensor([1., 0., 0.]).repeat(count, 1),
                              reference={"hoop_pos_cyl": torch.zeros(count, 3)})
     action = SimpleNamespace(nominal=torch.zeros(count, 29), actual_action_offset=torch.zeros(count, 29))
     env = SimpleNamespace(num_envs=count, device='cpu', common_step_counter=0,
@@ -66,8 +66,8 @@ def test_five_sensor_frames_and_actions_are_aligned_and_reset_is_isolated():
         action.actual_action_offset[:] = step * 2
         output = sensor(env)
     fields = dict(student_observation_fields(5))
-    assert output.shape == (2, 469)
-    joint_start = 1 + fields['projected_gravity_history'] + fields['pelvis_angular_velocity_history']
+    assert output.shape == (2, 471)
+    joint_start = 3 + fields['projected_gravity_history'] + fields['pelvis_angular_velocity_history']
     joints = output[:, joint_start:joint_start + 145].reshape(2, 5, 29)
     assert joints[:, :, 0].tolist() == [[6., 7., 8., 9., 10.], [3., 4., 5., 6., 7.]]
     actions = output[:, -148:-3].reshape(2, 5, 29)
@@ -89,7 +89,7 @@ def test_delay_sampling_includes_valid_bounds_and_zero_encoding_is_finite(nomina
     assert sensor.delay_steps.min() == 0
     assert sensor.delay_steps.max() == maximum
     assert torch.isfinite(sensor.delay_encoding).all()
-    assert sensor(env).shape == (1024, 469)
+    assert sensor(env).shape == (1024, 471)
 
 
 def test_sensor_curriculum_starts_clean_at_nominal_delay_and_reaches_full_range():
@@ -106,9 +106,9 @@ def test_sensor_curriculum_starts_clean_at_nominal_delay_and_reaches_full_range(
     assert sensor(env)[:, 1:31].abs().sum() > 0
 
 
-def test_legacy_three_frame_builder_dimension():
+def test_three_frame_builder_dimension():
     sensor, env, _, _ = make_sensor(nominal=2, maximum=4, history=3)
-    assert sensor(env).shape == (2, 283)
+    assert sensor(env).shape == (2, 285)
 
 
 def test_cylindrical_hoop_input_is_frozen_and_reset_per_environment():

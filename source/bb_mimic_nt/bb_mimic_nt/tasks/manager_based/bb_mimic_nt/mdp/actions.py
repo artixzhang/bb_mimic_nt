@@ -244,7 +244,7 @@ class StudentNominalJointPositionAction(ActionTerm):
         limits = self._asset.data.joint_pos_limits[:, self._joint_ids]
         self.lower = (limits[..., 0] + cfg.position_limit_margin).clone()
         self.upper = (limits[..., 1] - cfg.position_limit_margin).clone()
-        # v2 deployment carries final coordinates/limits, independent of Teacher scaling.
+        # Deployment carries final coordinates/limits, independent of Teacher scaling.
         for name, tensor_name in (("nominal_joint_position", "nominal"),
                                   ("safe_lower_joint_position", "lower"),
                                   ("safe_upper_joint_position", "upper")):

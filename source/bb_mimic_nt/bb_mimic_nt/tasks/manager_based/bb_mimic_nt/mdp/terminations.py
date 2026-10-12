@@ -72,4 +72,4 @@ def interaction_tracking_error(env, maximum_distance: float = 0.10, command_name
     term = _motion(env, command_name)
     distance = torch.linalg.vector_norm(term.actual_anchor_pos_w() - term.ball.data.root_pos_w[:, None], dim=-1)
     required = term.reference["contact"][:, :2] > 0.5
-    return torch.any(required & (distance > maximum_distance), dim=-1)
+    return term.object_reward_active & torch.any(required & (distance > maximum_distance), dim=-1)

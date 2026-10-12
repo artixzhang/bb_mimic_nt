@@ -27,7 +27,10 @@ from bb_mimic_nt.core import (
     select_adaptive_speed,
     slerp_wxyz,
 )
-from bb_mimic_nt.training import PPO_MAX_ITERATIONS, PPO_STEPS_PER_ENV, RSI_DECAY_STEPS, TEACHER_OBSERVATION_DIM
+from bb_mimic_nt.training import (
+    PPO_MAX_ITERATIONS, PPO_STEPS_PER_ENV, RSI_DECAY_STEPS, RSI_DECAY_FRACTION,
+    RSI_INITIAL_PROBABILITY, TEACHER_OBSERVATION_DIM,
+)
 
 
 def test_reference_residual_action_target_limits() -> None:
@@ -74,9 +77,9 @@ def test_action_accel_penalizes_reversal_after_two_samples() -> None:
 
 
 def test_rsi_schedule_uses_central_training_length() -> None:
-    assert RSI_DECAY_STEPS == int(PPO_STEPS_PER_ENV * PPO_MAX_ITERATIONS * 0.30)
-    assert rsi_probability(0, RSI_DECAY_STEPS) == pytest.approx(0.8)
-    assert rsi_probability(RSI_DECAY_STEPS // 2, RSI_DECAY_STEPS) == pytest.approx(0.4)
+    assert RSI_DECAY_STEPS == int(PPO_STEPS_PER_ENV * PPO_MAX_ITERATIONS * RSI_DECAY_FRACTION)
+    assert rsi_probability(0, RSI_DECAY_STEPS) == pytest.approx(RSI_INITIAL_PROBABILITY)
+    assert rsi_probability(RSI_DECAY_STEPS // 2, RSI_DECAY_STEPS) == pytest.approx(RSI_INITIAL_PROBABILITY / 2)
     assert rsi_probability(RSI_DECAY_STEPS, RSI_DECAY_STEPS) == 0.0
     assert rsi_probability(RSI_DECAY_STEPS * 2, RSI_DECAY_STEPS) == 0.0
 
@@ -149,7 +152,7 @@ def test_reward_normalization_gating_and_regularization_cap() -> None:
     joint = normalized_weighted_sum((one, one), (0.70, 0.30))
     body = normalized_weighted_sum((root, joint, one), (0.30, 0.40, 0.30))
     active = gated_top_level_reward(body, one, one, one, one, (0.45, 0.25, 0.20, 0.10))
-    post_hold = gated_top_level_reward(
+    end_hold = gated_top_level_reward(
         body, torch.zeros(3), torch.zeros(3), one, torch.zeros(3), (0.45, 0.25, 0.20, 0.10)
     )
     separate_gates = gated_top_level_reward(
@@ -162,7 +165,7 @@ def test_reward_normalization_gating_and_regularization_cap() -> None:
         relative_gate=torch.zeros(3),
     )
     assert torch.equal(active, one)
-    assert torch.equal(post_hold, one)
+    assert torch.equal(end_hold, one)
     assert torch.allclose(separate_gates, torch.full((3,), 0.55 / 0.60))
 
     cost = clipped_regularization(

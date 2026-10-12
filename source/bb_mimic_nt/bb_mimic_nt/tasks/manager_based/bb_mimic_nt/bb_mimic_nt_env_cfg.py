@@ -22,6 +22,7 @@ from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
 
 from bb_mimic_nt.training import TEACHER_HISTORY_LENGTH
+from bb_mimic_nt.skills import DEFAULT_SKILLS_PATH
 
 from bb_mimic_nt.objects import (
     BB_BALL_CFG,
@@ -38,8 +39,6 @@ from . import mdp
 
 EXTENSION_ROOT = Path(__file__).resolve().parents[4]
 ASSET_ROOT = EXTENSION_ROOT / "assets"
-MOTION_SOURCE = ASSET_ROOT / "trajectory" / "batch_setshot_1009.pkl"
-MOTION_CACHE = MOTION_SOURCE.with_name(f"{MOTION_SOURCE.stem}_processed.pt")
 ROBOT_URDF = ASSET_ROOT / "robots" / "g1" / "urdf" / "g1_29dof_mode16_bb.urdf"
 
 
@@ -165,14 +164,9 @@ class G1ShootSceneCfg(InteractiveSceneCfg):
 @configclass
 class CommandsCfg:
     motion = mdp.MotionReferenceCommandCfg(
-        source_path=str(MOTION_SOURCE),
-        cache_path=str(MOTION_CACHE),
+        skills_path=str(DEFAULT_SKILLS_PATH),
         urdf_path=str(ROBOT_URDF),
         rsi_decay_steps=RSI_DECAY_STEPS,
-        pre_hold_s=5.0,
-        post_hold_s=5.0,
-        # hold 采样 分别占动作的训练样本占比
-        hold_sampling_weights=(0.40, 0.40),
         hoop_center_offset=BB_HOOP_CENTER_OFFSET,
         hoop_root_quat=BB_HOOP_ROOT_ROTATION,
     )
@@ -189,7 +183,7 @@ class ActionsCfg:
 
 @configclass
 class ObservationsCfg:
-    """Teacher observations, including the explicit object-control phase."""
+    """Teacher observations, including the skill command."""
 
     @configclass
     class PolicyCfg(ObsGroup):
@@ -227,7 +221,7 @@ class ObservationsCfg:
         gravity_history = ObsTerm(func=mdp.gravity_vec_b, history_length=TEACHER_HISTORY_LENGTH)
         joint_position_history = ObsTerm(func=mdp.dof_pos, history_length=TEACHER_HISTORY_LENGTH)
         action_history = ObsTerm(func=mdp.previous_action, history_length=TEACHER_HISTORY_LENGTH)
-        phase = ObsTerm(func=mdp.phase)
+        skill_command = ObsTerm(func=mdp.skill_command)
         reference_speed = ObsTerm(func=mdp.reference_speed)
         domain_randomization = ObsTerm(func=mdp.dr_privileged_observation)
 
@@ -299,7 +293,7 @@ class G1ShootEnvCfg(ManagerBasedRLEnvCfg):
 
     def __post_init__(self) -> None:
         self.decimation = 2
-        # Long enough for the longest clip at 0.5x plus both holds. The motion
+        # Long enough for the longest clip at 0.5x plus the final hold. The motion
         # command remains the authoritative timeout condition.
         self.episode_length_s = 7.0
         self.is_finite_horizon = False
@@ -327,7 +321,6 @@ class G1ShootPlayEnvCfg(G1ShootEnvCfg):
         self.scene.num_envs = 1
         self.observations.policy.enable_corruption = False
         self.commands.motion.enable_rsi = False
-        self.commands.motion.hold_sampling_weights = None
         self.commands.motion.randomize_clip = False
         self.commands.motion.enable_adaptive_speed = False
         self.commands.motion.reset_dof_pos_noise = 0.0

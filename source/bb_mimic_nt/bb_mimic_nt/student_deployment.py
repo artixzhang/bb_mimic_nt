@@ -1,53 +1,50 @@
-"""Simulator-independent deployment contract, phase clock, and observation builder.
+"""Simulator-independent deployment contract and observation builder.
 
 Hardware adapters supply calibrated pelvis-frame IMU samples and ordered joint
 states. This module does not enable motors or implement hardware fault handling.
 """
 from __future__ import annotations
 
-import math
+import copy
 
 import torch
 
 from .student import student_observation_fields
 
 
-def build_deployment_contract(metadata: dict, batch: dict, motion_cfg) -> dict:
-    names = metadata['joint_names']
-    if list(batch['metadata']['dof_names']) != names:
-        raise ValueError('Motion cache joint order differs from exported policy.')
+def build_deployment_contract(batch: dict) -> dict:
     fps = float(batch['metadata']['fps'])
-    dt = 1. / float(metadata['policy_hz'])
-    if fps <= 0 or dt <= 0:
-        raise ValueError('Motion and policy frequencies must be positive.')
+    config = batch['metadata']['skill_config']
     profiles = []
-    for index, frames in enumerate(batch['lengths'].tolist()):
-        if frames < 2:
-            raise ValueError('Deployment motion must contain at least two frames.')
-        profiles.append(dict(
-            clip_id=index, frame_count=int(frames), reference_fps=fps,
-            initial_joint_position_rad=batch['dof_pos'][index, 0].detach().cpu().tolist(),
-            initial_root_position_m=batch['root_pos'][index, 0].detach().cpu().tolist(),
-            initial_root_quaternion_wxyz=batch['root_quat'][index, 0].detach().cpu().tolist(),
-            initial_ball_position_m=batch['object_pos'][index, 0].detach().cpu().tolist(),
-            initial_ball_controlled=bool(batch['release'][index, 0] < .5),
-        ))
+    clip_id = 0
+    for skill, count in zip(config['skills'], batch['metadata']['skill_clip_counts']):
+        for local_clip_id in range(count):
+            frames = int(batch['lengths'][clip_id])
+            profiles.append(dict(
+                clip_id=clip_id, skill_clip_id=local_clip_id, command_id=skill['command_id'],
+                frame_count=frames, reference_fps=fps, reference_duration_s=(frames - 1) / fps,
+                initial_joint_position_rad=batch['dof_pos'][clip_id, 0].detach().cpu().tolist(),
+                initial_root_position_m=batch['root_pos'][clip_id, 0].detach().cpu().tolist(),
+                initial_root_quaternion_wxyz=batch['root_quat'][clip_id, 0].detach().cpu().tolist(),
+                initial_ball_position_m=batch['object_pos'][clip_id, 0].detach().cpu().tolist(),
+                initial_ball_controlled=bool(batch['release'][clip_id, 0] < .5),
+                initial_hoop_pos_cyl=batch['hoop_pos_cyl'][clip_id, 0].detach().cpu().tolist(),
+            ))
+            clip_id += 1
     # Checkpoints retain motion facts; the exporter builds the public interface.
     return dict(
-        phase=dict(trained_pre_hold_s=float(motion_cfg.pre_hold_s),
-                   trained_post_hold_s=float(motion_cfg.post_hold_s), motion_profiles=profiles),
-        provenance=dict(motion_source_sha256=batch['metadata'].get('source_sha256'),
-                        robot_urdf_sha256=batch['metadata'].get('urdf_sha256')),
+        skills=dict(config=copy.deepcopy(config), motion_profiles=profiles),
+        provenance=dict(motion_source_sha256=[source['source_sha256'] for source in batch['metadata']['skill_sources']],
+                        robot_urdf_sha256=batch['metadata']['urdf_sha256']),
     )
 
 
-STUDENT_DEPLOYMENT_FORMAT = 'bb_mimic_nt_student_v2'
-_SCALE_NAMES = ('phase', 'gravity', 'angular_velocity', 'joint_position',
+_SCALE_NAMES = ('skill_command', 'gravity', 'angular_velocity', 'joint_position',
                 'joint_velocity', 'applied_action', 'hoop_position')
 _ACTION_TARGET = 'clip(nominal_joint_position + network_output, safe_lower_joint_position, safe_upper_joint_position)'
 _UNITS = ('dimensionless', 'dimensionless', 'rad/s', 'rad', 'rad/s', 'rad', 'm, rad, m')
 _SOURCES = (
-    'frame / (frame_count - 1)',
+    'one_hot(command_id, command_dimension); fixed for the episode',
     'R_world_from_pelvis.T @ [0, 0, -1]; xyz direction, not acceleration',
     'pelvis-frame angular velocity; xyz',
     'measured joint position - nominal_joint_position; joint_names order',
@@ -55,53 +52,102 @@ _SOURCES = (
     'PD target actually applied after position clipping and action delay - nominal_joint_position; joint_names order',
     'trajectory hoop_pos_cyl; [r, theta, z], frozen until reset',
 )
+_SKILL_FIELDS = ('name', 'command_id', 'motion_file', 'initialization', 'object', 'end')
+_PROFILE_FIELDS = (
+    'clip_id', 'skill_clip_id', 'command_id', 'frame_count', 'reference_fps', 'reference_duration_s',
+    'initial_joint_position_rad', 'initial_root_position_m', 'initial_root_quaternion_wxyz',
+    'initial_ball_position_m', 'initial_ball_controlled', 'initial_hoop_pos_cyl',
+)
 
 
 def student_observation_scales(metadata: dict) -> dict:
-    if metadata.get('format') == STUDENT_DEPLOYMENT_FORMAT:
+    if 'observation' in metadata:
         return {key: field['scale'] for key, field in zip(_SCALE_NAMES, metadata['observation']['fields'])}
     scales = dict(metadata['observation_settings']['scales'])
+    scales['skill_command'] = 1.
     position_scale = scales['hoop_position']
-    scales['hoop_position'] = [position_scale, scales.get('hoop_theta', position_scale), position_scale]
+    scales['hoop_position'] = [position_scale, scales['hoop_theta'], position_scale]
     return scales
 
 
 def student_sensor_delay(metadata: dict) -> int:
-    if metadata.get('format') == STUDENT_DEPLOYMENT_FORMAT:
+    if 'observation' in metadata:
         return metadata['observation']['sensor_delay_steps']
     return metadata['default_observation_delay_steps']
 
 
+def deployment_skills(contract: dict) -> dict:
+    """Describe command selection and reference initialization for each trained skill."""
+    config = contract['config']
+    profiles = [{key: profile[key] for key in _PROFILE_FIELDS} for profile in contract['motion_profiles']]
+    definitions = []
+    for skill in config['skills']:
+        definition = {key: skill[key] for key in _SKILL_FIELDS}
+        definition['motion_profile_ids'] = [
+            profile['clip_id'] for profile in profiles if profile['command_id'] == skill['command_id']
+        ]
+        definitions.append(definition)
+    return dict(
+        command=dict(
+            dimension=config['command']['dimension'], encoding='one_hot',
+            selection='explicit_command_id', lifetime='episode', switching='reset_required',
+        ),
+        definitions=definitions, motion_profiles=profiles,
+        execution=dict(
+            reference_speed=1.0, end_trigger_sampling='bernoulli_per_episode',
+            end_duration_sampling='uniform', end_hold='last_reference_frame',
+            completion='reference_then_optional_end_hold', timing='external_controller',
+            object_interaction='training reward and termination mask; does not actuate the ball',
+        ),
+    )
+
+
+def student_simulation_skill_config(metadata: dict) -> dict:
+    """Reconstruct simulator settings for explicit clip playback, without training sampling."""
+    skills = metadata['skills']
+    return dict(
+        command=dict(dimension=skills['command']['dimension']),
+        skills=[dict(**{key: copy.deepcopy(skill[key]) for key in _SKILL_FIELDS},
+                     sampling_weight=1.0, rsi=dict(enabled=False))
+                for skill in skills['definitions']],
+    )
+
+
 def compact_student_config(metadata: dict) -> dict:
-    """Project checkpoint/legacy metadata onto the deployment-only v2 interface."""
-    keys = ('observation_dim', 'action_dim', 'history_length', 'joint_names',
+    """Project checkpoint metadata onto the deployment-only skill-command interface."""
+    keys = ('observation_dim', 'action_dim', 'history_length', 'command_dimension', 'joint_names',
             'nominal_joint_position', 'safe_lower_joint_position', 'safe_upper_joint_position',
             'pd_stiffness', 'pd_damping', 'policy_hz', 'student_hidden_dims', 'activation')
-    if metadata.get('format') == STUDENT_DEPLOYMENT_FORMAT:
-        # Preserve the declared interface, rather than silently repairing corruption.
+    if 'observation' in metadata:
         result = {key: metadata[key] for key in (
-            'format', *keys, 'observation', 'action', 'phase', 'initialization')}
+            *keys, 'model', 'observation', 'action', 'skills', 'initialization')}
         if 'export_source' in metadata:
             result['export_source'] = metadata['export_source']
-        validate_student_config(result)
-        return result
+        return copy.deepcopy(result)
     contract = metadata['deployment_contract']
-    phase = contract['phase']
+    skills = deployment_skills(contract['skills'])
     scales = student_observation_scales(metadata)
     fields, offset = [], 0
     for (name, size), key, unit, source in zip(
-        student_observation_fields(metadata['history_length']), _SCALE_NAMES, _UNITS, _SOURCES
+        student_observation_fields(metadata['history_length'], metadata['command_dimension']), _SCALE_NAMES, _UNITS, _SOURCES
     ):
         fields.append(dict(name=name, start=offset, stop=offset + size,
-                           unit=unit, scale=scales[key], source=source))
+                           unit=unit, scale=scales[key], source=source,
+                           frame_size=size // metadata['history_length'] if name.endswith('_history') else size,
+                           history_length=metadata['history_length'] if name.endswith('_history') else 1))
         offset += size
-    result = dict(format=STUDENT_DEPLOYMENT_FORMAT, **{key: metadata[key] for key in keys})
+    result = {key: metadata[key] for key in keys}
     result.update(
+        model=dict(
+            file='student_policy.onnx',
+            input=dict(name='student_observation', dtype='float32', shape=[None, metadata['observation_dim']]),
+            output=dict(name='joint_position_offset', dtype='float32', shape=[None, metadata['action_dim']]),
+        ),
         observation=dict(
             dtype='float32', layout='field_major', history_order='oldest_to_newest',
             preprocessing='multiply each field by its scale; no other normalization or input clipping',
             sensor_delay_steps=metadata['default_observation_delay_steps'], fields=fields,
-            timing='sample before inference; only sensor histories have sensor_delay_steps; phase and applied-target history use the current tick',
+            timing='sample before inference; only sensor histories have sensor_delay_steps; skill command and applied-target history use the current tick',
         ),
         action=dict(
             unit='rad', output='joint_position_offset_from_nominal',
@@ -110,134 +156,17 @@ def compact_student_config(metadata: dict) -> dict:
             timing='clip before action delay; pad delay queue with the actual initial PD target; match total latency without duplicating hardware delay',
             pd='tau = pd_stiffness * (target - measured_q) - pd_damping * measured_qdot',
         ),
-        phase=dict(
-            pre_hold_s=phase['trained_pre_hold_s'], post_hold_s=phase['trained_post_hold_s'],
-            ready='phase=0; update histories continuously; trigger ACTIVE without resetting histories or frozen hoop position',
-            active='infer, submit target, then frame=min(frame + reference_fps / policy_hz, frame_count - 1); phase=frame / (frame_count - 1)',
-            final='phase=1 for post_hold_s, then hand control to the hardware controller',
-            motion_profiles=[{key: profile[key] for key in (
-                'clip_id', 'frame_count', 'reference_fps', 'initial_joint_position_rad',
-                'initial_root_position_m', 'initial_root_quaternion_wxyz',
-                'initial_ball_position_m', 'initial_ball_controlled',
-            )} for profile in phase['motion_profiles']],
-        ),
+        skills=skills,
         initialization=dict(
             startup='use the hardware startup controller to reach the selected profile pose and ball condition; nominal is the offset origin, not the startup pose',
             sensor_history='repeat the first measured gravity, angular velocity, q-minus-nominal and qdot into all sensor slots, including delay padding',
             action_history='repeat the actual initial applied PD target minus nominal into all action slots; the training target is the clipped initial reference pose',
-            hoop='supply trajectory hoop_pos_cyl in [r, theta, z] order (m, rad, m) once at reset',
+            hoop='supply selected profile initial_hoop_pos_cyl in [r, theta, z] order (m, rad, m) once at reset',
         ),
     )
-    validate_student_config(result)
-    return result
-
-
-def validate_student_config(metadata: dict) -> None:
-    """Validate dimensions, temporal layout, units and numerical deployment inputs."""
-    if metadata.get('format') != STUDENT_DEPLOYMENT_FORMAT:
-        raise ValueError('Unsupported Student deployment configuration format.')
-    history = metadata['history_length']
-    expected = student_observation_fields(history)
-    if metadata['observation_dim'] != sum(size for _, size in expected) or metadata['action_dim'] != 29:
-        raise ValueError('Student deployment dimensions disagree with history length.')
-    names = metadata['joint_names']
-    if len(names) != 29 or any(not isinstance(name, str) or not name for name in names) or len(set(names)) != 29:
-        raise ValueError('Deployment requires 29 distinct joint names.')
-    if not math.isfinite(metadata['policy_hz']) or metadata['policy_hz'] <= 0:
-        raise ValueError('Policy frequency must be positive and finite.')
-    if (not metadata['student_hidden_dims'] or any(type(size) is not int or size <= 0 for size in metadata['student_hidden_dims'])
-        or not isinstance(metadata['activation'], str)):
-        raise ValueError('Invalid Student network architecture.')
-    vectors = {}
-    for key in ('nominal_joint_position', 'safe_lower_joint_position', 'safe_upper_joint_position', 'pd_stiffness', 'pd_damping'):
-        value = torch.as_tensor(metadata[key])
-        if value.shape != (29,) or not torch.isfinite(value).all():
-            raise ValueError(f'Deployment {key} must contain 29 finite values.')
-        vectors[key] = value
-    lower, upper, nominal = (vectors[key] for key in ('safe_lower_joint_position', 'safe_upper_joint_position', 'nominal_joint_position'))
-    if torch.any(lower >= upper) or torch.any(nominal < lower) or torch.any(nominal > upper):
-        raise ValueError('Deployment joint limits/nominal position are invalid.')
-    if torch.any(vectors['pd_stiffness'] <= 0) or torch.any(vectors['pd_damping'] < 0):
-        raise ValueError('Deployment PD gains must have positive Kp and non-negative Kd.')
-    observation = metadata['observation']
-    if (observation['dtype'] != 'float32' or observation['layout'] != 'field_major'
-        or observation['history_order'] != 'oldest_to_newest'):
-        raise ValueError('Unsupported Student observation dtype/layout/history order.')
-    fields = observation['fields']
-    if len(fields) != len(expected):
-        raise ValueError('Student observation fields disagree with its history length.')
-    offset = 0
-    for field, (name, size), unit in zip(fields, expected, _UNITS):
-        if (field['name'], field['start'], field['stop'], field['unit']) != (name, offset, offset + size, unit):
-            raise ValueError('Student observation fields/units disagree with its history length.')
-        scale = torch.as_tensor(field['scale'])
-        allowed_shapes = ((), (3,)) if name == 'hoop_pos_cyl' else ((),)
-        if scale.shape not in allowed_shapes or not torch.isfinite(scale).all() or torch.any(scale <= 0):
-            raise ValueError('Observation scales must be positive and finite, with three components only for hoop_pos_cyl.')
-        offset += size
-    for delay in (observation['sensor_delay_steps'], metadata['action']['delay_steps']):
-        if type(delay) is not int or delay < 0:
-            raise ValueError('Deployment delays must be non-negative integer policy steps.')
-    if (metadata['action']['unit'] != 'rad' or metadata['action']['output'] != 'joint_position_offset_from_nominal'
-        or metadata['action']['target'] != _ACTION_TARGET):
-        raise ValueError('Unsupported Student action semantics.')
-    phase = metadata['phase']
-    for key in ('pre_hold_s', 'post_hold_s'):
-        if not math.isfinite(phase[key]) or phase[key] < 0:
-            raise ValueError('Phase hold durations must be finite and non-negative.')
-    profiles = phase['motion_profiles']
-    if not profiles:
-        raise ValueError('Deployment needs at least one motion profile.')
-    for index, profile in enumerate(profiles):
-        if (profile['clip_id'] != index or type(profile['frame_count']) is not int or profile['frame_count'] < 2
-            or not math.isfinite(profile['reference_fps']) or profile['reference_fps'] <= 0):
-            raise ValueError('Invalid deployment motion profile timing/order.')
-        for key, size in (('initial_joint_position_rad', 29), ('initial_root_position_m', 3),
-                          ('initial_root_quaternion_wxyz', 4), ('initial_ball_position_m', 3)):
-            value = torch.as_tensor(profile[key])
-            if value.shape != (size,) or not torch.isfinite(value).all():
-                raise ValueError(f'Invalid motion profile {key}.')
-        quat = torch.tensor(profile['initial_root_quaternion_wxyz'])
-        if abs(float(quat.norm()) - 1.) > 1.e-3 or type(profile['initial_ball_controlled']) is not bool:
-            raise ValueError('Invalid motion profile orientation/ball condition.')
-
-
-class StudentPhaseClock:
-    """Explicit shot clock. READY is opt-in; it has no learned-stability guarantee."""
-    def __init__(self, profile: dict, policy_hz: float, post_hold_s: float):
-        if (profile['frame_count'] < 2 or not math.isfinite(policy_hz) or policy_hz <= 0
-            or not math.isfinite(profile['reference_fps']) or profile['reference_fps'] <= 0
-            or not math.isfinite(post_hold_s) or post_hold_s < 0):
-            raise ValueError('Invalid phase-clock motion, frequency, or hold duration.')
-        self.last_frame = int(profile['frame_count']) - 1
-        self.advance = float(profile['reference_fps']) / policy_hz
-        self.post_ticks = max(1, math.ceil(post_hold_s * policy_hz - 1.e-6))
-        self.reset()
-
-    def reset(self):
-        self.frame = 0.
-        self.stage = 'READY'
-        self.hold_ticks = 0
-
-    @property
-    def phase(self):
-        return self.frame / self.last_frame
-
-    def trigger(self):
-        if self.stage != 'READY':
-            raise ValueError('Shot trigger is valid only in READY.')
-        self.stage = 'ACTIVE'
-
-    def after_policy_tick(self):
-        if self.stage == 'ACTIVE':
-            self.frame = min(self.frame + self.advance, self.last_frame)
-            if self.frame >= self.last_frame:
-                self.stage = 'POST_HOLD'
-        elif self.stage == 'POST_HOLD':
-            self.hold_ticks += 1
-            if self.hold_ticks >= self.post_ticks:
-                self.stage = 'DONE'
-
+    if 'export_source' in metadata:
+        result['export_source'] = copy.deepcopy(metadata['export_source'])
+    return copy.deepcopy(result)
 
 class StudentObservationState:
     """One robot's raw histories; inputs are calibrated, delay-free sensor samples.
@@ -246,8 +175,6 @@ When hardware samples already have latency, avoid applying the same latency a
 second time. Match the trained total latency through the hardware adapter.
 """
     def __init__(self, metadata: dict, sensor_delay_steps: int | None = None):
-        if metadata.get('format') == STUDENT_DEPLOYMENT_FORMAT:
-            validate_student_config(metadata)
         self.metadata = metadata
         self.history = metadata['history_length']
         self.delay = student_sensor_delay(metadata) if sensor_delay_steps is None else sensor_delay_steps
@@ -276,16 +203,16 @@ second time. Match the trained total latency through the hardware adapter.
         self._action = action.repeat(self.history, 1)
         self._hoop = self._vector(hoop_pos_cyl, 3).clone()
         self._last_tick = -1
-        self._last_phase = None
+        self._last_command = None
 
-    def observe(self, tick: int, phase: float, gravity, gyro, q, qdot, applied_pd_target):
+    def observe(self, tick: int, command_id: int, gravity, gyro, q, qdot, applied_pd_target):
         if self._sensor is None:
             raise ValueError('Reset deployment histories before inference.')
-        if not math.isfinite(phase) or not 0 <= phase <= 1:
-            raise ValueError('Phase must be finite and in [0, 1].')
+        if type(command_id) is not int or not 0 <= command_id < self.metadata['command_dimension']:
+            raise ValueError('Invalid skill command ID.')
+        if self._last_command is not None and command_id != self._last_command:
+            raise ValueError('Reset histories before changing the episode skill command.')
         if tick == self._last_tick:
-            if phase != self._last_phase:
-                raise ValueError('Phase changed within the same policy tick.')
             return self._observation.clone()
         if tick != self._last_tick + 1:
             raise ValueError('Policy tick skipped or reversed; hardware watchdog must handle missed deadlines.')
@@ -295,11 +222,11 @@ second time. Match the trained total latency through the hardware adapter.
         self._action = torch.cat((self._action[1:], action[None]))
         frames = self._sensor[:self.history]
         scales = student_observation_scales(self.metadata)
-        self._observation = torch.cat((torch.tensor([phase * scales['phase']]),
+        self._observation = torch.cat((torch.nn.functional.one_hot(torch.tensor(command_id), self.metadata['command_dimension']).float(),
             frames[:, :3].flatten() * scales['gravity'], frames[:, 3:6].flatten() * scales['angular_velocity'],
             frames[:, 6:35].flatten() * scales['joint_position'], frames[:, 35:64].flatten() * scales['joint_velocity'],
             self._action.flatten() * scales['applied_action'], self._hoop * torch.as_tensor(scales['hoop_position'], dtype=self._hoop.dtype)))[None]
-        self._last_tick, self._last_phase = tick, phase
+        self._last_tick, self._last_command = tick, command_id
         return self._observation.clone()
 
     def action_target(self, network_output):

@@ -19,12 +19,7 @@ for name, expected in manifest['artifacts_sha256'].items():
     if actual != expected:
         raise ValueError(f'Bundle checksum mismatch: {name}')
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "source/bb_mimic_nt"))
-from bb_mimic_nt.student_deployment import STUDENT_DEPLOYMENT_FORMAT, validate_student_config
 config = json.loads((args.bundle / 'student_config.json').read_text())
-if config.get('format') == STUDENT_DEPLOYMENT_FORMAT:
-    validate_student_config(config)
-elif config.get('format') != 'bb_mimic_nt_student_v1':
-    raise ValueError('Unsupported Student deployment configuration format.')
 vectors = np.load(args.bundle / 'verification_vectors.npz', allow_pickle=False)
 inputs, expected = vectors['observations'], vectors['action_offsets']
 if inputs.ndim != 2 or inputs.shape[1] != config['observation_dim']:
@@ -38,7 +33,7 @@ if args.backend == 'torchscript':
         output = model(torch.from_numpy(inputs).to(args.device)).cpu().numpy()
 else:
     import onnxruntime
-    session = onnxruntime.InferenceSession(str(args.bundle / 'student_policy.onnx'), providers=['CPUExecutionProvider'])
-    output = session.run(None, {'student_observation': inputs})[0]
+    session = onnxruntime.InferenceSession(str(args.bundle / config['model']['file']), providers=['CPUExecutionProvider'])
+    output = session.run([config['model']['output']['name']], {config['model']['input']['name']: inputs})[0]
 np.testing.assert_allclose(output, expected, rtol=1.e-4, atol=1.e-5)
 print(f'Bundle checksums and {args.backend} inference vectors verified; hardware validation remains separate.')

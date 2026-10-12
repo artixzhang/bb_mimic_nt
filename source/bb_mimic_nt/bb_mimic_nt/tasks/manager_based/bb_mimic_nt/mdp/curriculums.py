@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-from bb_mimic_nt.training import TEACHER_OBSERVATION_DIM
-
 from .commands import MotionReferenceCommand, rsi_probability
 from .contacts import CONTACT_SENSOR_NAMES
 from .events import curriculum_strength, get_dr_context, training_policy_steps
@@ -19,9 +17,10 @@ def rsi_curriculum(env, env_ids, command_name: str = "motion") -> dict[str, floa
         if env.action_manager.total_action_dim != 29:
             raise ValueError(f"Expected a 29-dimensional action, got {env.action_manager.total_action_dim}.")
         observation_shape = env.observation_manager.group_obs_dim["policy"]
-        if observation_shape != (TEACHER_OBSERVATION_DIM,):
+        expected_dimension = 673 + term.command_dimension
+        if observation_shape != (expected_dimension,):
             raise ValueError(
-                f"Expected policy observation shape ({TEACHER_OBSERVATION_DIM},), got {observation_shape}."
+                f"Expected policy observation shape ({expected_dimension},), got {observation_shape}."
             )
         missing_sensors = set(CONTACT_SENSOR_NAMES).difference(env.scene.keys())
         if missing_sensors:
@@ -29,6 +28,12 @@ def rsi_curriculum(env, env_ids, command_name: str = "motion") -> dict[str, floa
         if env.reward_manager.active_terms != ["unified_mimic"]:
             raise ValueError(f"Expected one unified reward term, got {env.reward_manager.active_terms}.")
         term._environment_contract_validated = True
+    return rsi_schedule(env, command_name)
+
+
+def rsi_schedule(env, command_name: str = "motion") -> dict[str, float]:
+    """Report live RSI probability for either Teacher or Student environments."""
+    term: MotionReferenceCommand = env.command_manager.get_term(command_name)
     probability = 0.0
     if term.cfg.enable_rsi:
         probability = rsi_probability(

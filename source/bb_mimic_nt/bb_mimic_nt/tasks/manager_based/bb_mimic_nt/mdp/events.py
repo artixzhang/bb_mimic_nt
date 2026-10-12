@@ -318,10 +318,9 @@ def reset_domain_randomization(env, env_ids: torch.Tensor):
 
 
 def _push_clock(motion):
-    """Monotonic reference seconds: negative pre-hold, frames/fps, then post-hold."""
+    """Monotonic reference seconds followed by the final-pose hold."""
     clock = motion.frame / motion.fps
-    clock = torch.where(motion.stage == 0, motion.hold_time - motion.pre_hold_duration, clock)
-    return torch.where(motion.stage >= 2, clock + motion.hold_time, clock)
+    return torch.where(motion.stage >= 1, clock + motion.hold_time, clock)
 
 
 def arm_push(env, env_ids: torch.Tensor):
@@ -337,8 +336,8 @@ def arm_push(env, env_ids: torch.Tensor):
     clips = motion.clip_ids[env_ids]
     start = _push_clock(motion)[env_ids]
     last = (motion.lengths[clips] - 1) / motion.fps
-    # The command marks DONE one policy interval before the end of post-hold.
-    post = (motion.post_hold_duration[env_ids] - env.step_dt).clamp_min(0)
+    # The command marks DONE one policy interval before the end of the final-pose hold.
+    post = (motion.end_hold_duration[env_ids] - env.step_dt).clamp_min(0)
     end = last + post
     for name, pulse in context.pushes.items():
         if name == "global_push":
@@ -351,15 +350,14 @@ def arm_push(env, env_ids: torch.Tensor):
             left = torch.maximum(frames / motion.fps, start[:, None].clamp_min(0))
             right = torch.minimum((frames + 1) / motion.fps, last[:, None])
             weights = (right - left).clamp_min(0) * allowed
-            pre_weight = (-start).clamp_min(0) * allowed[:, 0]
             post_weight = post * allowed.gather(1, (motion.lengths[clips] - 1)[:, None]).squeeze(1)
-            weights = torch.cat((pre_weight[:, None], weights, post_weight[:, None]), dim=1)
+            weights = torch.cat((weights, post_weight[:, None]), dim=1)
             total = weights.sum(1)
             rank = torch.rand_like(total) * total
             cumulative = weights.cumsum(1)
             index = (cumulative <= rank[:, None]).sum(1).clamp_max(weights.shape[1] - 1)
             previous = (cumulative - weights).gather(1, index[:, None]).squeeze(1)
-            starts = torch.cat((start[:, None], left, last[:, None]), dim=1)
+            starts = torch.cat((left, last[:, None]), dim=1)
             target = starts.gather(1, index[:, None]).squeeze(1) + rank - previous
             available = total > 0
         pulse.target[env_ids] = torch.where(pulse.selected[env_ids] & available, target, float("inf"))
@@ -393,7 +391,7 @@ def advance_push_pulse(env, env_ids: torch.Tensor | None):
     clock = _push_clock(motion)[ids]
     changed = torch.zeros(len(ids), device=env.device, dtype=torch.bool)
     for name, pulse in context.pushes.items():
-        allowed = motion.stage[ids] != 3
+        allowed = ~motion.motion_done[ids]
         if name != "global_push":
             field = "obj_push" if name == "object_push" else "push_available"
             allowed &= motion.reference[field][ids]

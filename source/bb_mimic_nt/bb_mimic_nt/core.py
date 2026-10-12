@@ -10,20 +10,7 @@ from collections.abc import Mapping, Sequence
 
 import torch
 
-
-def hold_sampling_probability(
-    active_duration: torch.Tensor, hold_duration: float, relative_weight: float
-) -> torch.Tensor:
-    """Select whole holds with expected time <= weight * nominal active time."""
-    if not math.isfinite(hold_duration) or hold_duration < 0:
-        raise ValueError("hold_duration must be finite and non-negative.")
-    if not math.isfinite(relative_weight) or relative_weight < 0:
-        raise ValueError("hold sampling weights must be finite and non-negative.")
-    if not torch.isfinite(active_duration).all() or torch.any(active_duration < 0):
-        raise ValueError("active_duration must be finite and non-negative.")
-    if hold_duration == 0:
-        return torch.zeros_like(active_duration)
-    return (active_duration * (relative_weight / hold_duration)).clamp(0., 1.)
+from bb_mimic_nt.training import RSI_INITIAL_PROBABILITY
 
 
 def reference_residual_target(
@@ -113,7 +100,7 @@ def interpolate_motion(
     return torch.lerp(first, second, blend.view(blend_shape))
 
 
-def rsi_probability(step: int, decay_steps: int, initial_probability: float = 0.8) -> float:
+def rsi_probability(step: int, decay_steps: int, initial_probability: float = RSI_INITIAL_PROBABILITY) -> float:
     if decay_steps <= 0:
         return 0.0
     return initial_probability * max(0.0, 1.0 - float(step) / float(decay_steps))

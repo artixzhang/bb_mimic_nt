@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_LOGS = PROJECT_ROOT / 'logs/rsl_rl/g1_shoot_student_dagger_v1'
+DEFAULT_LOGS = PROJECT_ROOT / 'logs/rsl_rl/g1_shoot_student_dagger_v3'
 
 
 def latest_student_checkpoint(logs_dir: Path) -> Path:

@@ -20,7 +20,7 @@ def test_student_play_randomization_is_off_by_default_and_independently_enabled(
         def __init__(self):
             self.scene = SimpleNamespace(num_envs=32)
             self.commands = SimpleNamespace(motion=SimpleNamespace(
-                enable_rsi=False, randomize_clip=True, hold_sampling_weights=(1., 1.),
+                enable_rsi=True, randomize_clip=True,
                 reset_dof_pos_noise=.05, reset_dof_vel_noise=.05))
             self.student_observation = SimpleNamespace(enable_noise=True, randomize_delay=True)
             self.dr = SimpleNamespace(**{name: SimpleNamespace(enabled=True, full_strength=False) for name in names})

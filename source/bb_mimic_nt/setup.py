@@ -20,6 +20,7 @@ INSTALL_REQUIRES = [
     "joblib>=1.3",
     "pin>=2.7,<4",
     "psutil",
+    "PyYAML>=6",
 ]
 
 # Installation operation

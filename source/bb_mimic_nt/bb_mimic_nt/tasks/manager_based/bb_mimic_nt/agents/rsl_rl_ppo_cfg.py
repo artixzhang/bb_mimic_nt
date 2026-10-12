@@ -11,7 +11,7 @@ class G1ShootPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = PPO_STEPS_PER_ENV
     max_iterations = PPO_MAX_ITERATIONS
     save_interval = 100
-    experiment_name = "g1_shoot_teacher_v2"
+    experiment_name = "g1_shoot_teacher_v3"
     seed = 42
     empirical_normalization = False
     clip_actions = None

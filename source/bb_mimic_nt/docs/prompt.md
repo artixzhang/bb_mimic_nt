@@ -138,7 +138,7 @@ termination项目包括:
 - history_dof_pos [29*3]
 - history_action [29*3]
 
-- phase [1]
+- skill_command [command.dimension]：按 command_id 排序的技能 one-hot 标签
 
 可以根据项目需求调整, 不一定严格按照上述项目.
 
@@ -235,7 +235,7 @@ DR 从一开始就全范围采样, 严格和教师策略保持一致.
 DAgger 蒸馏的学生策略完全不包含自适应播放速度, 而是以固定的 1x 推进.
 
 学生策略的观测项目包括:
-- phase
+- skill_command：整个 episode 固定的技能 one-hot 标签
 - 重力投影, 历史 3 帧
 - pelvis 角速度, 历史 3 帧
 - 相对 nominal pose 的关节位置, 历史 3 帧

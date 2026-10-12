@@ -153,8 +153,8 @@ def reference_release(env) -> torch.Tensor:
     return motion_command(env).reference["release"].unsqueeze(-1)
 
 
-def phase(env) -> torch.Tensor:
-    return motion_command(env).normalized_phase.unsqueeze(-1)
+def skill_command(env) -> torch.Tensor:
+    return motion_command(env).command
 
 
 def reference_speed(env) -> torch.Tensor:

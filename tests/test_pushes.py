@@ -29,8 +29,8 @@ def setup_pushes(count=3):
                                   link_weights={"torso": 1., "pelvis": 3.}).items():
             setattr(cfg, f"{name}_{suffix}", value)
     motion = SimpleNamespace(
-        frame=torch.zeros(count), fps=10., stage=torch.ones(count, dtype=torch.long),
-        hold_time=torch.zeros(count), pre_hold_duration=torch.ones(count), post_hold_duration=torch.ones(count),
+        frame=torch.zeros(count), fps=10., stage=torch.zeros(count, dtype=torch.long), motion_done=torch.zeros(count, dtype=torch.bool),
+        hold_time=torch.zeros(count), end_hold_duration=torch.ones(count),
         clip_ids=torch.zeros(count, dtype=torch.long), lengths=torch.tensor([11]),
         _batch={"push_available": torch.ones(1, 11), "obj_push": torch.ones(1, 11)},
         reference={"push_available": torch.ones(count, dtype=torch.bool), "obj_push": torch.ones(count, dtype=torch.bool)},
@@ -116,30 +116,30 @@ def test_global_samples_all_stages_and_object_inherits_hold_endpoint_gates():
     ctx.motion._batch['obj_push'][0, -1] = 1
     events.arm_push(env, torch.arange(env.num_envs))
     target = ctx.pushes['global_push'].target
-    assert (target < 0).any() and ((target >= 0) & (target < 1)).any() and (target >= 1).any()
+    assert (target >= 0).all() and (target < 1).any() and (target >= 1).any()
     assert torch.isinf(ctx.pushes['push'].target).all()
     target = ctx.pushes['object_push'].target
-    assert ((target >= -1) & (target < 1.99)).all()
+    assert ((target >= 0) & (target < 1.99)).all()
     assert not ((target >= .1) & (target < 1)).any()
-    assert (target < 0).any() and (target >= 1).any()
+    assert (target < .1).any() and (target >= 1).any()
 
 
 def test_rsi_skips_past_and_padding_and_hold_pulse_stops_at_done():
     env, ctx = setup_pushes(500)
     ctx.motion.frame[:] = 7.
-    ctx.motion.pre_hold_duration[:] = 0.
     ctx.motion._batch['obj_push'] = torch.ones(1, 30)  # Padding must not create targets.
     events.arm_push(env, torch.arange(env.num_envs))
     for pulse in ctx.pushes.values():
         assert (pulse.target >= .7).all() and (pulse.target < 1.99).all()
-    ctx.motion.stage[:] = 2
+    ctx.motion.stage[:] = 1
     ctx.motion.frame[:] = 10.
     ctx.motion.hold_time[:] = .5
     pulse = ctx.pushes['object_push']
     pulse.target[:] = 1.4
     events.advance_push_pulse(env, None)
     assert ctx.ball.force.any()
-    ctx.motion.stage[:] = 3
+    ctx.motion.stage[:] = 2
+    ctx.motion.motion_done[:] = True
     events.advance_push_pulse(env, None)
     assert not ctx.ball.force.any()
 

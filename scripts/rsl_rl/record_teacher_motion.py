@@ -11,14 +11,13 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--checkpoint', required=True, help='Teacher model checkpoint.')
 parser.add_argument('--export_dir', required=True, help='Directory for teacher_motion.pkl.')
-parser.add_argument('--pre_hold', '--pre_hold_s', dest='pre_hold', type=float, default=0.0)
-parser.add_argument('--post_hold', '--post_hold_s', dest='post_hold', type=float, default=5.0)
+parser.add_argument('--end-duration-s', type=float, default=None)
 parser.add_argument('--clip_ids', type=int, nargs='+', help='Source clip IDs; default: all clips.')
 parser.add_argument('--seed', type=int, default=42)
 parser.add_argument('--num_envs', type=int, default=32, help='Parallel recording environments (default: 32; 1 for serial).')
 AppLauncher.add_app_launcher_args(parser)
 args, hydra_args = parser.parse_known_args()
-if args.pre_hold < 0 or args.post_hold < 0:
+if args.end_duration_s is not None and args.end_duration_s < 0:
     parser.error('Hold durations must be non-negative.')
 if args.num_envs < 1:
     parser.error('--num_envs must be positive.')
@@ -167,10 +166,14 @@ def main(env_cfg, agent_cfg):
     if args.device is not None:
         env_cfg.sim.device = agent_cfg.device = args.device
     cfg = env_cfg.commands.motion
-    cfg.pre_hold_s, cfg.post_hold_s = args.pre_hold, args.post_hold
+    cfg.end_duration_s = args.end_duration_s
     cfg.enable_rsi = cfg.randomize_clip = cfg.enable_adaptive_speed = False
-    cfg.hold_sampling_weights = None
-    source, _ = validate_motion_batch(joblib.load(cfg.source_path))
+    from bb_mimic_nt.skills import load_skill_config
+    cfg.skills_config = cfg.skills_config or load_skill_config(cfg.skills_path)
+    source = []
+    for skill in cfg.skills_config['skills']:
+        clips, _ = validate_motion_batch(joblib.load(skill['motion_file']))
+        source.extend(clips)
     clip_ids = args.clip_ids if args.clip_ids is not None else list(range(len(source)))
     if not clip_ids:
         raise ValueError('No source clips to record.')

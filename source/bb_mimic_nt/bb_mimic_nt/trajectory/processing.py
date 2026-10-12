@@ -226,8 +226,8 @@ def _validate_clip(clip: dict[str, Any], clip_index: int) -> None:
         "hoop_pos_w": (3,),
         "hoop_pos_cyl": (3,),
     }
-    if frame_count < 2:
-        raise ValueError(f"Clip {clip_index} must contain at least two frames.")
+    if frame_count < 1:
+        raise ValueError(f"Clip {clip_index} must contain at least one frame.")
     for key, shape in expected_shapes.items():
         value = np.asarray(clip[key])
         if value.shape != shape:

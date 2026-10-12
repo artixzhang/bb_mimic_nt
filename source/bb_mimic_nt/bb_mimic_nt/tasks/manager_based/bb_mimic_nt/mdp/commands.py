@@ -8,7 +8,6 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import MISSING
-from pathlib import Path
 
 import torch
 
@@ -21,26 +20,21 @@ from isaaclab.utils.math import quat_apply, quat_apply_inverse, quat_error_magni
 
 from bb_mimic_nt.core import (
     downward_hoop_crossing,
-    hold_sampling_probability,
     interpolate_motion,
     motion_interpolation_indices,
     rsi_probability,
     select_adaptive_speed,
 )
-from bb_mimic_nt.trajectory import (
-    TRACKED_BODY_NAMES,
-    cache_is_current,
-    load_motion_batch,
-    preprocess_motion_batch,
-)
+from bb_mimic_nt.trajectory import TRACKED_BODY_NAMES
+from bb_mimic_nt.skills import DEFAULT_SKILLS_PATH, load_skill_config, load_skill_motion_batch, sample_skill_clips
+from bb_mimic_nt.training import RSI_INITIAL_PROBABILITY
 
 from .contacts import contact_graph
 from .events import arm_push, training_policy_steps
 
-STAGE_PRE_HOLD = 0
-STAGE_ACTIVE = 1
-STAGE_POST_HOLD = 2
-STAGE_DONE = 3
+STAGE_ACTIVE = 0
+STAGE_END_HOLD = 1
+STAGE_DONE = 2
 
 
 class MotionReferenceCommand(CommandTerm):
@@ -49,16 +43,17 @@ class MotionReferenceCommand(CommandTerm):
     cfg: "MotionReferenceCommandCfg"
 
     def __init__(self, cfg: "MotionReferenceCommandCfg", env):
-        source = Path(cfg.source_path)
-        urdf = Path(cfg.urdf_path)
-        cache = Path(cfg.cache_path)
-        if cfg.auto_preprocess and not cache_is_current(cache, source, urdf, tuple(cfg.tracked_body_names)):
-            preprocess_motion_batch(source, urdf, cache, tracked_body_names=tuple(cfg.tracked_body_names))
-        if not cache.is_file():
-            raise FileNotFoundError(
-                f"Motion cache not found: {cache}. Run scripts/preprocess_trajectory.py or enable auto_preprocess."
-            )
-        self._batch = load_motion_batch(cache, device=env.device)
+        self.skill_config = cfg.skills_config or load_skill_config(cfg.skills_path)
+        cfg.skills_config = self.skill_config
+        # Managers copy their configurations. Persist the resolved skill facts
+        # on the environment configuration used by training archives as well.
+        env.cfg.commands.motion.skills_config = self.skill_config
+        self._batch = load_skill_motion_batch(
+            self.skill_config, cfg.urdf_path, cfg.tracked_body_names,
+            device=env.device, auto_preprocess=cfg.auto_preprocess,
+        )
+        if cfg.end_duration_s is not None and (not math.isfinite(cfg.end_duration_s) or cfg.end_duration_s < 0):
+            raise ValueError('end_duration_s must be finite and non-negative.')
         super().__init__(cfg, env)
 
         self.robot: Articulation = env.scene[cfg.robot_name]
@@ -125,19 +120,27 @@ class MotionReferenceCommand(CommandTerm):
         self.clip_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.fixed_clip_ids = torch.full_like(self.clip_ids, -1)
         self.frame = torch.zeros(self.num_envs, device=self.device)
-        self.stage = torch.full_like(self.clip_ids, STAGE_PRE_HOLD)
+        self.stage = torch.full_like(self.clip_ids, STAGE_ACTIVE)
         self.hold_time = torch.zeros(self.num_envs, device=self.device)
-        # Actual per-episode durations; cfg holds remain the full-length contract.
-        self.pre_hold_duration = torch.zeros_like(self.hold_time)
-        self.post_hold_duration = torch.zeros_like(self.hold_time)
-        self.stage_duration = torch.zeros((self.num_envs, 3), device=self.device)
-        for duration in (cfg.pre_hold_s, cfg.post_hold_s):
-            hold_sampling_probability(self.hold_time, duration, 0.)
-        if cfg.hold_sampling_weights is not None:
-            if len(cfg.hold_sampling_weights) != 2:
-                raise ValueError("hold_sampling_weights must contain pre and post weights.")
-            for weight in cfg.hold_sampling_weights:
-                hold_sampling_probability(self.hold_time, 0., weight)
+        self.end_hold_duration = torch.zeros_like(self.hold_time)
+        self.end_hold_triggered = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.stage_duration = torch.zeros((self.num_envs, 2), device=self.device)
+        skills = self.skill_config['skills']
+        self.command_dimension = self.skill_config['command']['dimension']
+        self.skill_ids = torch.zeros_like(self.clip_ids)
+        self.skill_command_ids = torch.tensor([s['command_id'] for s in skills], device=self.device)
+        self.skill_weights = torch.tensor([s['sampling_weight'] for s in skills], device=self.device)
+        self.skill_clip_counts = torch.tensor(self._batch['metadata']['skill_clip_counts'], device=self.device)
+        self.skill_clip_offsets = self.skill_clip_counts.cumsum(0) - self.skill_clip_counts
+        self.clip_skill_ids = torch.repeat_interleave(torch.arange(len(skills), device=self.device), self.skill_clip_counts)
+        self.skill_end_bounds = torch.tensor([s['end']['duration_s'] for s in skills], device=self.device)
+        # Older resolved archives predate this option and always executed end.
+        self.skill_end_probabilities = torch.tensor(
+            [s['end'].get('trigger_probability', 1.0) for s in skills], device=self.device
+        )
+        self.skill_rsi_enabled = torch.tensor([s['rsi']['enabled'] for s in skills], device=self.device)
+        self.skill_interaction_enabled = torch.tensor([s['object']['interaction_enabled'] for s in skills], device=self.device)
+        self.skill_end_interaction_enabled = torch.tensor([s['end']['object_interaction_enabled'] for s in skills], device=self.device)
         self.speed = torch.zeros(self.num_envs, device=self.device)
         self.tracking_error_ema = torch.full(
             (self.num_envs,), cfg.adaptive_initial_error, device=self.device
@@ -190,25 +193,6 @@ class MotionReferenceCommand(CommandTerm):
             self.metrics[f"control/joint/{name}/raw_action_abs"] = torch.zeros(
                 self.num_envs, device=self.device
             )
-        self._phase_names = ("controlled", "free")
-        self._phase_metric_names = (
-            "root_rmse",
-            "dof_rmse",
-            "link_rmse",
-            "ball_rmse",
-            "error/relative_position_rmse_m",
-            "error/contact_mismatch_rate",
-            "control/raw_action_rms",
-            "control/pd_error_rmse_rad",
-        )
-        self._phase_durations = {
-            name: torch.zeros(self.num_envs, device=self.device) for name in self._phase_names
-        }
-        self._phase_metric_sums = {
-            f"phase/{phase}/{metric}": torch.zeros(self.num_envs, device=self.device)
-            for phase in self._phase_names
-            for metric in self._phase_metric_names
-        }
         self._pickup_event_count = torch.zeros(self.num_envs, device=self.device)
         self._release_event_count = torch.zeros(self.num_envs, device=self.device)
         self._time_averaged_metric_names = tuple(name for name in self.metrics if name != "shot_success")
@@ -222,16 +206,15 @@ class MotionReferenceCommand(CommandTerm):
 
     @property
     def command(self) -> torch.Tensor:
-        return torch.stack((self.normalized_phase, self.speed), dim=-1)
+        return torch.nn.functional.one_hot(
+            self.skill_command_ids[self.skill_ids], self.command_dimension
+        ).float()
 
     @property
-    def normalized_phase(self) -> torch.Tensor:
-        last = (self.lengths[self.clip_ids] - 1).clamp_min(1).float()
-        return (self.frame / last).clamp(0.0, 1.0)
-
-    @property
-    def motion_reward_active(self) -> torch.Tensor:
-        return self.stage < STAGE_POST_HOLD
+    def object_reward_active(self) -> torch.Tensor:
+        return self.skill_interaction_enabled[self.skill_ids] & (
+            self.in_active_motion | self.skill_end_interaction_enabled[self.skill_ids]
+        )
 
     @property
     def object_control_active(self) -> torch.Tensor:
@@ -384,20 +367,6 @@ class MotionReferenceCommand(CommandTerm):
         extras["interaction/release_count"] = self._release_event_count[env_ids].mean()
         self._pickup_event_count[env_ids] = 0.0
         self._release_event_count[env_ids] = 0.0
-        for phase in self._phase_names:
-            phase_duration = self._phase_durations[phase][env_ids]
-            extras[f"phase/{phase}/fraction"] = (phase_duration / duration).mean()
-            # Resolve the variable-size selection once per phase, preserving
-            # the original reduction order and exclusion of absent episodes.
-            present_ids = (phase_duration > 0.0).nonzero(as_tuple=False).flatten()
-            for metric in self._phase_metric_names:
-                key = f"phase/{phase}/{metric}"
-                conditional_mean = self._phase_metric_sums[key][env_ids] / phase_duration.clamp_min(
-                    self._env.step_dt
-                )
-                extras[key] = conditional_mean[present_ids].mean() if len(present_ids) else duration.new_zeros(())
-                self._phase_metric_sums[key][env_ids] = 0.0
-            self._phase_durations[phase][env_ids] = 0.0
         action_term = self._env.action_manager.get_term("joint_pos")
         for index, name in enumerate(self.dof_names):
             extras[f"control/joint/{name}/residual_scale_rad"] = (
@@ -407,8 +376,10 @@ class MotionReferenceCommand(CommandTerm):
             metric[env_ids] = 0.0
         stage_time = self.stage_duration[env_ids]
         total_stage_time = stage_time.sum().clamp_min(self._env.step_dt)
-        for index, name in enumerate(("pre_hold", "active", "post_hold")):
+        for index, name in enumerate(("active", "end_hold")):
             extras[f"sampling/{name}/fraction"] = stage_time[:, index].sum() / total_stage_time
+        extras["sampling/end_trigger_fraction"] = self.end_hold_triggered[env_ids].float().mean()
+        extras["sampling/end_hold_duration_s"] = self.end_hold_duration[env_ids].mean()
         self.stage_duration[env_ids] = 0.
         values = torch.stack(tuple(extras.values())).cpu().tolist()
         return dict(zip(extras, values))
@@ -421,29 +392,36 @@ class MotionReferenceCommand(CommandTerm):
         extras = self._collect_episode_metrics(env_ids)
 
         if self.cfg.randomize_clip:
-            sampled_clips = torch.randint(self.num_clips, (len(env_ids),), device=self.device)
+            _, sampled_clips = sample_skill_clips(
+                self.skill_weights, self.skill_clip_counts, self.skill_clip_offsets, len(env_ids)
+            )
         else:
             sampled_clips = torch.full(
                 (len(env_ids),), self.cfg.default_clip_id, dtype=torch.long, device=self.device
             )
         fixed = self.fixed_clip_ids[env_ids]
         self.clip_ids[env_ids] = torch.where(fixed >= 0, fixed, sampled_clips)
+        self.skill_ids[env_ids] = self.clip_skill_ids[self.clip_ids[env_ids]]
         probability = rsi_probability(
             training_policy_steps(self._env), self.cfg.rsi_decay_steps, self.cfg.rsi_initial_probability
         ) if self.cfg.enable_rsi else 0.0
-        use_rsi = torch.rand(len(env_ids), device=self.device) < probability
+        use_rsi = (torch.rand(len(env_ids), device=self.device) < probability) & self.skill_rsi_enabled[self.skill_ids[env_ids]]
         valid_frame_count = self.lengths[self.clip_ids[env_ids]].clamp_min(1)
         random_frames = torch.floor(torch.rand(len(env_ids), device=self.device) * valid_frame_count).float()
         self.frame[env_ids] = torch.where(use_rsi, random_frames, torch.zeros_like(random_frames))
-        self._sample_hold_durations(env_ids, use_rsi)
-        start_active = use_rsi | (self.pre_hold_duration[env_ids] == 0.)
-        self.stage[env_ids] = torch.where(
-            start_active,
-            torch.full_like(self.stage[env_ids], STAGE_ACTIVE),
-            torch.full_like(self.stage[env_ids], STAGE_PRE_HOLD),
-        )
+        bounds = self.skill_end_bounds[self.skill_ids[env_ids]]
+        self.end_hold_duration[env_ids] = bounds[:, 0] + torch.rand(len(env_ids), device=self.device) * (bounds[:, 1] - bounds[:, 0])
+        if self.cfg.end_duration_s is not None:
+            self.end_hold_duration[env_ids] = self.cfg.end_duration_s
+        probability = self.skill_end_probabilities[self.skill_ids[env_ids]]
+        triggered = torch.rand(len(env_ids), device=self.device) < probability
+        self.end_hold_triggered[env_ids] = triggered
+        self.end_hold_duration[env_ids] *= triggered.float()
+        at_end = self.frame[env_ids] >= valid_frame_count - 1
+        final_stage = torch.where(self.end_hold_duration[env_ids] > 0, STAGE_END_HOLD, STAGE_DONE)
+        self.stage[env_ids] = torch.where(at_end, final_stage, STAGE_ACTIVE)
         self.hold_time[env_ids] = 0.0
-        self.speed[env_ids] = start_active.float()
+        self.speed[env_ids] = (~at_end).float()
         self.tracking_error_ema[env_ids] = self.cfg.adaptive_initial_error
         self.speed_update_elapsed[env_ids] = 0.0
         self.rsi_started[env_ids] = use_rsi
@@ -464,25 +442,6 @@ class MotionReferenceCommand(CommandTerm):
         self.time_left[env_ids] = 1.0e9
         self.command_counter[env_ids] = 1
         return extras
-
-    def _sample_hold_durations(self, env_ids: torch.Tensor, use_rsi: torch.Tensor) -> None:
-        remaining_frames = (self.lengths[self.clip_ids[env_ids]] - 1).float() - self.frame[env_ids]
-        active_duration = remaining_frames.clamp_min(0.) / self.fps
-        for index, (buffer, duration) in enumerate((
-            (self.pre_hold_duration, self.cfg.pre_hold_s),
-            (self.post_hold_duration, self.cfg.post_hold_s),
-        )):
-            if self.cfg.hold_sampling_weights is None:
-                buffer[env_ids] = duration
-            else:
-                probability = hold_sampling_probability(
-                    active_duration, duration, self.cfg.hold_sampling_weights[index]
-                )
-                buffer[env_ids] = (torch.rand(len(env_ids), device=self.device) < probability).float() * duration
-        # RSI starts inside the action and cannot prepend an initial-frame hold.
-        self.pre_hold_duration[env_ids] = torch.where(
-            use_rsi, 0., self.pre_hold_duration[env_ids]
-        )
 
     def set_clip_ids(self, clip_ids: int | torch.Tensor, env_ids: Sequence[int] | None = None) -> None:
         if env_ids is None:
@@ -645,13 +604,6 @@ class MotionReferenceCommand(CommandTerm):
         for name, value in instantaneous.items():
             self.metrics[name] += value * dt
         active = self.in_active_motion
-        controlled = active & self.object_control_active
-        phase_masks = {"controlled": controlled, "free": active & ~self.object_control_active}
-        for phase, mask in phase_masks.items():
-            weight = mask.float() * dt
-            self._phase_durations[phase] += weight
-            for metric in self._phase_metric_names:
-                self._phase_metric_sums[f"phase/{phase}/{metric}"] += instantaneous[metric] * weight
         current_control = self.object_control_active
         self._pickup_event_count += (active & current_control & ~self._previous_object_control).float()
         self._release_event_count += (active & ~current_control & self._previous_object_control).float()
@@ -671,17 +623,9 @@ class MotionReferenceCommand(CommandTerm):
 
     def _update_command(self) -> None:
         dt = self._env.step_dt
-        for index in range(3):
+        for index in range(2):
             self.stage_duration[:, index] += (self.stage == index).float() * dt
-        pre = self.stage == STAGE_PRE_HOLD
-        post = self.stage == STAGE_POST_HOLD
-        self.hold_time[pre | post] += dt
-        start_ids = (pre & (self.hold_time + 1.0e-6 >= self.pre_hold_duration)).nonzero(as_tuple=False).flatten()
-        self.stage[start_ids] = STAGE_ACTIVE
-        self.speed[start_ids] = 1.0
-        self.tracking_error_ema[start_ids] = self.cfg.adaptive_initial_error
-        self.speed_update_elapsed[start_ids] = 0.0
-        self.hold_time[start_ids] = 0.0
+        self.hold_time[self.stage == STAGE_END_HOLD] += dt
 
         active = self.stage == STAGE_ACTIVE
         if torch.any(active):
@@ -703,7 +647,7 @@ class MotionReferenceCommand(CommandTerm):
                     self.speed[speed_update] = 1.0
                 self.speed_update_elapsed[speed_update] = 0.0
 
-            # Free-object phases always run at physical 1x time. A later pickup
+            # Free-object intervals always run at physical 1x time. A later pickup
             # can resume adaptive timing, so repeated dribbles/passes do not
             # rely on a single terminal release frame.
             free_object = active & ~self.object_control_active
@@ -712,15 +656,15 @@ class MotionReferenceCommand(CommandTerm):
             last = (self.lengths[self.clip_ids] - 1).float()
             reached = active & (self.frame >= last)
             self.frame[:] = torch.minimum(self.frame, last)
-            self.stage[reached] = STAGE_POST_HOLD
+            self.stage[reached] = STAGE_END_HOLD
             self.speed[reached] = 0.0
             self.hold_time[reached] = 0.0
 
         # Terminations are evaluated before CommandManager.compute. Mark done
         # one policy interval early so the triggering physics frame completes
-        # exactly post_hold_s seconds of last-frame tracking.
-        done_threshold = (self.post_hold_duration - dt).clamp_min(0.)
-        finished = (self.stage == STAGE_POST_HOLD) & (self.hold_time + 1.0e-6 >= done_threshold)
+        # exactly end_duration_s seconds of last-frame tracking.
+        done_threshold = (self.end_hold_duration - dt).clamp_min(0.)
+        finished = (self.stage == STAGE_END_HOLD) & (self.hold_time + 1.0e-6 >= done_threshold)
         self.stage[finished] = STAGE_DONE
         self.speed[finished] = 0.0
         self._refresh_reference()
@@ -776,8 +720,8 @@ class MotionReferenceCommand(CommandTerm):
 @configclass
 class MotionReferenceCommandCfg(CommandTermCfg):
     class_type: type[CommandTerm] = MotionReferenceCommand
-    source_path: str = MISSING
-    cache_path: str = MISSING
+    skills_path: str = str(DEFAULT_SKILLS_PATH)
+    skills_config: dict | None = None
     urdf_path: str = MISSING
     robot_name: str = "robot"
     ball_name: str = "ball"
@@ -786,15 +730,11 @@ class MotionReferenceCommandCfg(CommandTermCfg):
     hoop_root_quat: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
     tracked_body_names: list[str] = list(TRACKED_BODY_NAMES)
     auto_preprocess: bool = True
-    pre_hold_s: float = 1.0
-    post_hold_s: float = 1.0
-    # Expected time relative to nominal 1x active time: (pre, post).
-    # None executes both full holds every episode (play/legacy behavior).
-    hold_sampling_weights: tuple[float, float] | None = None
+    end_duration_s: float | None = None  # Optional playback/recording override.
     randomize_clip: bool = True
     default_clip_id: int = 0
     enable_rsi: bool = True
-    rsi_initial_probability: float = 0.8
+    rsi_initial_probability: float = RSI_INITIAL_PROBABILITY
     rsi_decay_steps: int = 144_000
     enable_adaptive_speed: bool = False
     speed_choices: tuple[float, float, float, float] = (0.5, 0.75, 1.0, 1.25)

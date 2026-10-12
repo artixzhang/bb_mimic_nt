@@ -97,7 +97,7 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import bb_mimic_nt.tasks  # noqa: F401
-from bb_mimic_nt.training import RSI_DECAY_FRACTION
+from bb_mimic_nt.training import configure_training_curricula
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -115,11 +115,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
     )
     if isinstance(env_cfg, ManagerBasedRLEnvCfg) and hasattr(env_cfg, "dr"):
-        env_cfg.dr.total_iterations = agent_cfg.max_iterations
-        env_cfg.dr.steps_per_iteration = agent_cfg.num_steps_per_env
-        env_cfg.commands.motion.rsi_decay_steps = int(
-            agent_cfg.max_iterations * agent_cfg.num_steps_per_env * RSI_DECAY_FRACTION
-        )
+        configure_training_curricula(env_cfg, agent_cfg.max_iterations, agent_cfg.num_steps_per_env)
 
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here
@@ -209,9 +205,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         runner.load(resume_path)
         if hasattr(base_env.cfg, "dr"):
             completed = runner.current_learning_iteration
-            base_env.cfg.dr.total_iterations = completed + agent_cfg.max_iterations
-            base_env.cfg.commands.motion.rsi_decay_steps = int(
-                base_env.cfg.dr.total_iterations * agent_cfg.num_steps_per_env * RSI_DECAY_FRACTION
+            configure_training_curricula(
+                base_env.cfg, completed + agent_cfg.max_iterations, agent_cfg.num_steps_per_env,
+                motion_cfg=base_env.command_manager.get_term("motion").cfg,
             )
             base_env.dr_context.iteration_offset = completed
             base_env.reset()

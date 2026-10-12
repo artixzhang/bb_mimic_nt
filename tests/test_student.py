@@ -23,7 +23,7 @@ from bb_mimic_nt.student import (
 
 
 def test_student_contract_and_teacher_target_equivalence() -> None:
-    assert sum(size for _, size in STUDENT_OBSERVATION_FIELDS) == STUDENT_OBSERVATION_DIM == 469
+    assert sum(size for _, size in STUDENT_OBSERVATION_FIELDS) == STUDENT_OBSERVATION_DIM == 471
     raw = torch.tensor([[-3.0, 0.0, 3.0]])
     reference = torch.tensor([[0.3, 0.0, -0.4]])
     scale = torch.tensor([[0.5, 0.5, 0.5]])

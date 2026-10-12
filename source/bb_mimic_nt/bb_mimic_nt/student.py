@@ -11,11 +11,13 @@ STUDENT_HISTORY_LENGTH = 5
 STUDENT_ACTION_DIM = 29
 
 
-def student_observation_fields(history_length: int) -> tuple[tuple[str, int], ...]:
+def student_observation_fields(history_length: int, command_dimension: int = 3) -> tuple[tuple[str, int], ...]:
     if not isinstance(history_length, int) or history_length < 1:
         raise ValueError("Student history length must be a positive integer.")
+    if type(command_dimension) is not int or command_dimension < 1:
+        raise ValueError("Command dimension must be a positive integer.")
     return (
-        ("phase", 1),
+        ("skill_command", command_dimension),
         ("projected_gravity_history", 3 * history_length),
         ("pelvis_angular_velocity_history", 3 * history_length),
         ("joint_position_offset_history", 29 * history_length),

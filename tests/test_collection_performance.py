@@ -35,16 +35,6 @@ def legacy_episode_metrics(self, env_ids):
     extras['interaction/release_count'] = self._release_event_count[env_ids].mean().item()
     self._pickup_event_count[env_ids] = 0.0
     self._release_event_count[env_ids] = 0.0
-    for phase in self._phase_names:
-        phase_duration = self._phase_durations[phase][env_ids]
-        extras[f'phase/{phase}/fraction'] = (phase_duration / duration).mean().item()
-        present = phase_duration > 0.0
-        for metric in self._phase_metric_names:
-            key = f'phase/{phase}/{metric}'
-            conditional_mean = self._phase_metric_sums[key][env_ids] / phase_duration.clamp_min(self._env.step_dt)
-            extras[key] = conditional_mean[present].mean().item() if torch.any(present) else 0.0
-            self._phase_metric_sums[key][env_ids] = 0.0
-        self._phase_durations[phase][env_ids] = 0.0
     action_term = self._env.action_manager.get_term('joint_pos')
     for index, name in enumerate(self.dof_names):
         extras[f'control/joint/{name}/residual_scale_rad'] = action_term.residual_scale[env_ids, index].mean().item()
@@ -52,8 +42,10 @@ def legacy_episode_metrics(self, env_ids):
         metric[env_ids] = 0.0
     stage_time = self.stage_duration[env_ids]
     total_stage_time = stage_time.sum().clamp_min(self._env.step_dt)
-    for index, name in enumerate(('pre_hold', 'active', 'post_hold')):
+    for index, name in enumerate(('active', 'end_hold')):
         extras[f'sampling/{name}/fraction'] = (stage_time[:, index].sum() / total_stage_time).item()
+    extras['sampling/end_trigger_fraction'] = self.end_hold_triggered[env_ids].float().mean().item()
+    extras['sampling/end_hold_duration_s'] = self.end_hold_duration[env_ids].mean().item()
     self.stage_duration[env_ids] = 0.0
     return extras
 
@@ -72,11 +64,9 @@ def test_episode_logging_matches_legacy_and_preserves_other_envs(device, ids):
         last_episode_clip_ids=torch.zeros(3, device=device, dtype=torch.long),
         clip_ids=torch.tensor([2, 1, 0], device=device),
         _pickup_event_count=tensor([1, 2, 3]), _release_event_count=tensor([0, 1, 2]),
-        _phase_names=("controlled", "free"), _phase_metric_names=("error", "other"),
-        _phase_durations={"controlled": tensor([.01, 0, .03]), "free": tensor([0, 0, 0])},
-        _phase_metric_sums={f"phase/{p}/{m}": tensor([.002, 0, .006])
-                            for p in ("controlled", "free") for m in ("error", "other")},
-        dof_names=("a", "b"), stage_duration=tensor([[.01, 0, 0], [0, .04, 0], [.01, .03, .05]]),
+        end_hold_triggered=torch.tensor([True, False, True], device=device),
+        end_hold_duration=tensor([2., 0., 5.]),
+        dof_names=("a", "b"), stage_duration=tensor([[.01, 0], [.04, 0], [.03, .05]]),
     )
     expected_term = copy.deepcopy(term)
     env_ids = torch.tensor(ids, device=device)
@@ -87,7 +77,7 @@ def test_episode_logging_matches_legacy_and_preserves_other_envs(device, ids):
         actual = collect(term, env_ids)
     assert actual == expected
     assert all(isinstance(v, float) for v in actual.values())
-    for key in ("metrics", "last_episode_metrics", "_phase_durations", "_phase_metric_sums"):
+    for key in ("metrics", "last_episode_metrics"):
         for name, value in getattr(term, key).items():
             assert torch.equal(value, getattr(expected_term, key)[name])
     for key in ("last_episode_clip_ids", "_pickup_event_count", "_release_event_count", "stage_duration"):

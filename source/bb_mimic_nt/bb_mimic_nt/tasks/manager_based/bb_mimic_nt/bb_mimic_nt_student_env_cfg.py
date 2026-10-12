@@ -52,7 +52,6 @@ class StudentDomainRandomizationCfg(DomainRandomizationCfg):
 
 @configclass
 class StudentObservationScalesCfg:
-    phase: float = 1.0
     gravity: float = 1.0
     angular_velocity: float = 0.25
     joint_position: float = 1.0
@@ -137,7 +136,6 @@ class G1ShootStudentEnvCfg(G1ShootEnvCfg):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        self.commands.motion.enable_rsi = False
         self.commands.motion.enable_adaptive_speed = False
 
 
@@ -150,7 +148,6 @@ class G1ShootStudentPlayEnvCfg(G1ShootStudentEnvCfg):
         self.scene.num_envs = 1
         self.commands.motion.enable_rsi = False
         self.commands.motion.randomize_clip = False
-        self.commands.motion.hold_sampling_weights = None
         self.commands.motion.reset_dof_pos_noise = 0.0
         self.commands.motion.reset_dof_vel_noise = 0.0
         self.student_observation.enable_noise = False

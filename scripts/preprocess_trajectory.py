@@ -10,25 +10,34 @@ import argparse
 from pathlib import Path
 
 from bb_mimic_nt.trajectory import preprocess_motion_batch
+from bb_mimic_nt.skills import DEFAULT_SKILLS_PATH, load_skill_config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_INPUT = PROJECT_ROOT / "source/bb_mimic_nt/assets/trajectory/shoot.pkl"
-DEFAULT_OUTPUT = PROJECT_ROOT / "source/bb_mimic_nt/assets/trajectory/shoot_processed.pt"
 DEFAULT_URDF = PROJECT_ROOT / "source/bb_mimic_nt/assets/robots/g1/urdf/g1_29dof_mode16_bb.urdf"
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, default=DEFAULT_INPUT, help="Raw joblib motion batch.")
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="Output torch motion cache.")
+    parser.add_argument("--skills", type=Path, default=DEFAULT_SKILLS_PATH, help="Skill YAML used when --input is omitted.")
+    parser.add_argument("--input", type=Path, default=None, help="Raw joblib motion batch.")
+    parser.add_argument("--output", type=Path, default=None, help="Output torch motion cache.")
     parser.add_argument("--urdf", type=Path, default=DEFAULT_URDF, help="URDF used for forward kinematics.")
     parser.add_argument("--force", action="store_true", help="Rebuild even when the cache hash is current.")
     args = parser.parse_args()
 
-    cache = preprocess_motion_batch(args.input, args.urdf, args.output, force=args.force)
+    if args.output is not None and args.input is None:
+        parser.error('--output requires --input.')
+    sources = [args.input] if args.input else [Path(skill['motion_file']) for skill in load_skill_config(args.skills)['skills']]
+    for source in sources:
+        output = args.output or source.with_name(source.stem + '_processed.pt')
+        cache = preprocess_motion_batch(source, args.urdf, output, force=args.force)
+        report_cache(cache, output)
+
+
+def report_cache(cache: dict, output: Path) -> None:
     metadata = cache["metadata"]
     lengths = cache["lengths"]
-    print(f"MotionBatchV{metadata['schema_version']} ready at {args.output.resolve()}")
+    print(f"MotionBatchV{metadata['schema_version']} ready at {output.resolve()}")
     print(
         f"clips={metadata['num_clips']} fps={metadata['fps']:.0f} "
         f"frames={int(lengths.min())}..{int(lengths.max())} padded={metadata['max_frames']}"

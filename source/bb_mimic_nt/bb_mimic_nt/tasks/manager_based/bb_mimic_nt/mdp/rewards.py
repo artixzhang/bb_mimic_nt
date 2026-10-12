@@ -151,10 +151,13 @@ def relative_position_reward(actual: torch.Tensor, reference: torch.Tensor, sigm
 
 
 def contact_graph_reward(
-    actual: torch.Tensor, reference: torch.Tensor, hand_sensitivity: float, foot_sensitivity: float
+    actual: torch.Tensor, reference: torch.Tensor, hand_sensitivity: float, foot_sensitivity: float, hand_gate: torch.Tensor | None = None
 ) -> torch.Tensor:
     sensitivity = actual.new_tensor((hand_sensitivity, hand_sensitivity, foot_sensitivity, foot_sensitivity))
-    return torch.exp(-torch.sum(sensitivity * torch.abs(actual - reference), dim=-1))
+    error = sensitivity * torch.abs(actual - reference)
+    if hand_gate is not None:
+        error[:, :2] *= hand_gate[:, None]
+    return torch.exp(-torch.sum(error, dim=-1))
 
 
 @configclass
@@ -205,8 +208,8 @@ class UnifiedRewardCfg:
     # position, direction, speed_magnitude, rotation
     object_weights: tuple[float, float, float, float] = (0.50, 0.30, 0.2, 0.0)
     object_curriculum: ObjectRewardCurriculumCfg = ObjectRewardCurriculumCfg()
-    object_free_phase_weight: float = 1.0
-    relative_free_phase_weight: float = 0.3
+    object_free_weight: float = 1.0
+    relative_free_weight: float = 0.3
 
     link_pos_body_weights: dict[str, float] = {
         "left_hand": 2.0, 
@@ -477,6 +480,7 @@ class UnifiedMimicReward(ManagerTermBase):
             reference["contact"],
             settings.hand_contact_sensitivity,
             settings.foot_contact_sensitivity,
+            hand_gate=term.object_reward_active.float(),
         )
         foot_link_indices = tuple(
             term.tracked_body_names.index(name)
@@ -501,7 +505,7 @@ class UnifiedMimicReward(ManagerTermBase):
         foot_airborne_height_penalty = settings.foot_airborne_height_weight * foot_airborne_height_shortfall
         # Treat the root as supported whenever either reference foot is on the
         # ground. The one-sided shortfall is therefore active only during the
-        # reference flight phase and cannot be satisfied by merely tucking the
+        # reference flight interval and cannot be satisfied by merely tucking the
         # legs while leaving the pelvis low.
         reference_root_support = torch.amax(reference_foot_contact, dim=-1)
         actual_root_height = robot.data.root_link_pos_w[:, 2] - origin[:, 2]
@@ -513,12 +517,12 @@ class UnifiedMimicReward(ManagerTermBase):
         )
         root_airborne_height_penalty = settings.root_airborne_height_weight * root_airborne_height_shortfall
         object_control = term.object_control_active.float()
-        reward_active = term.motion_reward_active.float()
+        reward_active = term.object_reward_active.float()
         object_gate = reward_active * (
-            object_control + (1.0 - object_control) * settings.object_free_phase_weight
+            object_control + (1.0 - object_control) * settings.object_free_weight
         )
         relative_gate = reward_active * (
-            object_control + (1.0 - object_control) * settings.relative_free_phase_weight
+            object_control + (1.0 - object_control) * settings.relative_free_weight
         )
         mimic = gated_top_level_reward(
             body,
