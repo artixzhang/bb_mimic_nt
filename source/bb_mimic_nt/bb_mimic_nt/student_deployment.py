@@ -49,7 +49,7 @@ _SOURCES = (
     'pelvis-frame angular velocity; xyz',
     'measured joint position - nominal_joint_position; joint_names order',
     'measured joint velocity; joint_names order',
-    'PD target actually applied after position clipping and action delay - nominal_joint_position; joint_names order',
+    'PD target actually applied after position clipping - nominal_joint_position; joint_names order',
     'external hoop_pos_cyl parameter; [r, theta, z]; update between shots, hold during a shot',
 )
 _SKILL_FIELDS = ('name', 'command_id', 'object', 'end')
@@ -63,12 +63,6 @@ def student_observation_scales(metadata: dict) -> dict:
     position_scale = scales['hoop_position']
     scales['hoop_position'] = [position_scale, scales['hoop_theta'], position_scale]
     return scales
-
-
-def student_sensor_delay(metadata: dict) -> int:
-    if 'observation' in metadata:
-        return metadata['observation']['sensor_delay_steps']
-    return metadata['default_observation_delay_steps']
 
 
 def deployment_skills(contract: dict) -> dict:
@@ -166,14 +160,13 @@ def compact_student_config(metadata: dict, *, default_skill: str | None = None,
         observation=dict(
             dtype='float32', layout='field_major', history_order='oldest_to_newest',
             preprocessing='multiply each field by its scale; no other normalization or input clipping',
-            sensor_delay_steps=metadata['default_observation_delay_steps'], fields=fields,
-            timing='sample before inference; only sensor histories have sensor_delay_steps; skill command and applied-target history use the current tick',
+            fields=fields,
+            timing='sample current sensors before inference; skill command and applied-target history use the current tick',
         ),
         action=dict(
             unit='rad', output='joint_position_offset_from_nominal',
             target=_ACTION_TARGET,
-            delay_steps=metadata['default_action_delay_steps'],
-            timing='clip before action delay; pad delay queue with the actual initial PD target; match total latency without duplicating hardware delay',
+            timing='apply position-clipped target immediately after inference',
             pd='tau = pd_stiffness * (target - measured_q) - pd_damping * measured_qdot',
         ),
         skills=skills,
@@ -187,6 +180,10 @@ def compact_student_config(metadata: dict, *, default_skill: str | None = None,
 
 
 def _configure_startup(result, metadata, default_skill, initial_pose, initial_clip_index):
+    result['observation'].pop('sensor_delay_steps', None)
+    result['action'].pop('delay_steps', None)
+    result['observation']['timing'] = 'sample current sensors before inference; skill command and applied-target history use the current tick'
+    result['action']['timing'] = 'apply position-clipped target immediately after inference'
     definitions = result['skills']['definitions']
     if not definitions:
         raise ValueError('At least one deployment skill is required.')
@@ -200,11 +197,13 @@ def _configure_startup(result, metadata, default_skill, initial_pose, initial_cl
     for field in result['observation']['fields']:
         if field['name'] == 'skill_command':
             field['source'] = _SOURCES[0]
+        elif field['name'] == 'applied_action_offset_history':
+            field['source'] = _SOURCES[5]
         elif field['name'] == 'hoop_pos_cyl':
             field['source'] = _SOURCES[-1]
     result['initialization'] = dict(
         startup='reach initial_pose (rad, joint_names order), then run default_skill',
-        sensor_history='repeat first measured gravity, gyro, q-minus-nominal and qdot, including delay padding',
+        sensor_history='repeat first measured gravity, gyro, q-minus-nominal and qdot',
         action_history='repeat actual initial applied PD target minus nominal; retain histories across skill and hoop updates',
     )
 
@@ -243,12 +242,8 @@ def _finalize_command_contract(config: dict) -> None:
     skills['command']['valid_ids'] = [i for i, label in enumerate(labels) if label is not None]
 
 class StudentObservationState:
-    """One robot's raw histories; inputs are calibrated, delay-free sensor samples.
-
-When hardware samples already have latency, avoid applying the same latency a
-second time. Match the trained total latency through the hardware adapter.
-"""
-    def __init__(self, metadata: dict, sensor_delay_steps: int | None = None):
+    """One robot's histories, using current calibrated samples at each policy tick."""
+    def __init__(self, metadata: dict):
         self.metadata = metadata
         skills = metadata.get('skills')
         if skills is not None:
@@ -258,9 +253,6 @@ second time. Match the trained total latency through the hardware adapter.
             self._valid_commands = ({skill['command_id'] for skill in contract['config']['skills']}
                                     if contract else set(range(metadata['command_dimension'])))
         self.history = metadata['history_length']
-        self.delay = student_sensor_delay(metadata) if sensor_delay_steps is None else sensor_delay_steps
-        if not isinstance(self.delay, int) or self.delay < 0:
-            raise ValueError('Sensor delay must be a non-negative integer.')
         self.nominal = torch.tensor(metadata['nominal_joint_position'], dtype=torch.float32)
         self.lower = torch.tensor(metadata['safe_lower_joint_position'], dtype=torch.float32)
         self.upper = torch.tensor(metadata['safe_upper_joint_position'], dtype=torch.float32)
@@ -280,7 +272,7 @@ second time. Match the trained total latency through the hardware adapter.
     def reset(self, gravity, gyro, q, qdot, applied_pd_target, hoop_pos_cyl):
         sensor = self._sample(gravity, gyro, q, qdot)
         action = self._vector(applied_pd_target, 29) - self.nominal
-        self._sensor = sensor.repeat(self.history + self.delay, 1)
+        self._sensor = sensor.repeat(self.history, 1)
         self._action = action.repeat(self.history, 1)
         self._hoop = self._vector(hoop_pos_cyl, 3).clone()
         self._last_tick = -1
@@ -307,7 +299,7 @@ second time. Match the trained total latency through the hardware adapter.
             self._hoop = self._vector(hoop_pos_cyl, 3).clone()
         self._sensor = torch.cat((self._sensor[1:], sensor[None]))
         self._action = torch.cat((self._action[1:], action[None]))
-        frames = self._sensor[:self.history]
+        frames = self._sensor
         scales = student_observation_scales(self.metadata)
         self._observation = torch.cat((torch.nn.functional.one_hot(torch.tensor(command_id), self.metadata['command_dimension']).float(),
             frames[:, :3].flatten() * scales['gravity'], frames[:, 3:6].flatten() * scales['angular_velocity'],

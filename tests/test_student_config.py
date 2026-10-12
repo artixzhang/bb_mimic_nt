@@ -35,10 +35,10 @@ def training_metadata():
 
 
 @pytest.mark.parametrize('delay', [0, 1, 3])
-def test_deployment_observations_match_training_with_actual_scales_and_nonzero_nominal(training_metadata, delay):
+def test_deployment_uses_current_samples_with_actual_scales_and_nonzero_nominal(training_metadata, delay):
     training_metadata['default_observation_delay_steps'] = delay
     config = compact_student_config(training_metadata)
-    sim, env, data, action = make_sensor(nominal=delay)
+    sim, env, data, action = make_sensor(nominal=0)
     env.cfg.student_observation.scales = SimpleNamespace(**training_metadata['observation_settings']['scales'])
     action.nominal[:] = .1
     data.projected_gravity_b[:] = torch.tensor([.1, -.2, -.97])
@@ -277,3 +277,21 @@ def test_simulation_references_are_supplied_separately(training_metadata):
     local['skills'][0]['command_id'] = 9
     with pytest.raises(ValueError, match='Simulation skills'):
         student_simulation_skill_config(config, local)
+
+
+def test_reexport_removes_legacy_artificial_delay(training_metadata):
+    import copy
+    import json
+    training_metadata['default_action_delay_steps'] = 3
+    config = compact_student_config(training_metadata)
+    assert 'delay' not in json.dumps(config).lower()
+    legacy = copy.deepcopy(config)
+    legacy['observation']['sensor_delay_steps'] = 2
+    legacy['observation']['timing'] = 'sensor delay'
+    legacy['action']['delay_steps'] = 3
+    legacy['action']['timing'] = 'action delay'
+    legacy['observation']['fields'][5]['source'] = 'target after action delay'
+    legacy['initialization']['sensor_history'] = 'repeat with delay padding'
+    before = copy.deepcopy(legacy)
+    assert compact_student_config(legacy) == config
+    assert legacy == before

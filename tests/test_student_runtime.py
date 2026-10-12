@@ -87,7 +87,7 @@ def test_student_deployment_and_torchscript_roundtrip(tmp_path, history, stale_s
     assert cfg.student_observation.scales.joint_velocity == .05
     assert cfg.student_observation.scales.hoop_position == .25
     assert cfg.student_observation.scales.hoop_theta == 2.
-    assert cfg.student_observation.delay_min_steps == cfg.student_observation.delay_max_steps == 1
+    assert cfg.student_observation.delay_min_steps == cfg.student_observation.delay_max_steps == 0
     assert cfg.actions.joint_pos.safe_lower_joint_position == [-2.] * 29
     assert [skill['command_id'] for skill in cfg.commands.motion.skills_config['skills']] == [0, 1, 2]
     assert [skill['end'] for skill in cfg.commands.motion.skills_config['skills']] == [
@@ -115,7 +115,7 @@ def test_student_deployment_and_torchscript_roundtrip(tmp_path, history, stale_s
     onnx.checker.check_model(str(tmp_path / 'student_policy.onnx'))
 
 
-def test_training_metadata_restores_history_and_delay():
+def test_training_metadata_deploys_without_artificial_delay():
     metadata = dict(command_dimension=3, history_length=3, observation_dim=285, default_action_delay_steps=2, action_adapter={},
                     observation_settings=dict(delay_nominal_steps=2, delay_max_offset_steps=2,
                                               gravity_noise_std=.015, angular_velocity_noise_std=.05,
@@ -124,8 +124,9 @@ def test_training_metadata_restores_history_and_delay():
                           dr=SimpleNamespace(), actions=SimpleNamespace(joint_pos=SimpleNamespace()))
     student_apply_deployment_config(cfg, metadata)
     assert cfg.student_observation.history_length == 3
-    assert (cfg.student_observation.delay_min_steps, cfg.student_observation.delay_max_steps) == (0, 4)
-    assert cfg.student_observation.delay_nominal_steps == 2
+    assert (cfg.student_observation.delay_min_steps, cfg.student_observation.delay_max_steps) == (0, 0)
+    assert cfg.student_observation.delay_nominal_steps == 0
+    assert cfg.dr.delay_nominal_steps == cfg.dr.delay_max_offset_steps == 0
     assert cfg.student_observation.randomize_delay is False
 
 

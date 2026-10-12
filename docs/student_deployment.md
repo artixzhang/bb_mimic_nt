@@ -46,7 +46,7 @@ PYTHONPATH=source/bb_mimic_nt python scripts/rsl_rl/export_student.py \
 
 ## 观测接口
 
-`model.input` / `model.output` 定义 ONNX 的 name、dtype 和 shape；首项 `null` 表示动态 batch。顶层 `policy_hz` 是策略频率，delay_steps 的单位均为策略 tick。
+`model.input` / `model.output` 定义 ONNX 的 name、dtype 和 shape；首项 `null` 表示动态 batch。顶层 `policy_hz` 是策略频率。
 
 `observation.fields` 定义输入布局。每项的 `[start:stop]` 是零基且右开切片；`frame_size` 是每帧元素数，`history_length` 是该字段的帧数；`unit` 是缩放前的单位，输入为 `raw_value * scale`。
 
@@ -62,7 +62,7 @@ PYTHONPATH=source/bb_mimic_nt python scripts/rsl_rl/export_student.py \
 
 历史按 field-major 拼接：先拼完一种观测的所有帧，再拼下一种。每种历史为 oldest-to-newest，每帧按 xyz 或 joint_names 顺序。输入维数为 `93 * history_length + 3 + command_dimension`；5 帧历史、3 维 command 时为 471。输入没有 phase、参考帧或时间进度。
 
-只有 gravity/gyro/q/qdot 的 sensor histories 应用 `observation.sensor_delay_steps`；command、hoop 和 action history 不额外应用传感器延迟。action history 中的 target 本身已经经过 action delay。
+每个策略 tick 使用当前传感器采样更新历史，最新一帧参与本次推理。部署配置不包含传感器或动作的人工延迟字段。
 
 hoop 是外部观测参数，不是 ONNX 常量，也不在 JSON 中保存固定坐标。按与训练轨迹 hoop_pos_cyl 相同的坐标约定传入，不额外进行 pelvis 坐标变换。各分量缩放来自字段 scale，例如 `[0.25, 2.0, 0.25]`，theta 的 2.0 是单独的弧度缩放，不再乘 0.25。
 
@@ -79,9 +79,9 @@ target = clip(nominal_joint_position + network_output,
 
 所有关节数组遵循 joint_names。pd_stiffness 为 Kp（N·m/rad），pd_damping 为 Kd（N·m·s/rad）；位置限位已包含训练使用的 margin。
 
-转换后匹配 `action.delay_steps` 的执行延迟。下一 tick 的 action history 填实际已生效的 PD target，不填尚未生效的预测或实测关节角。延迟队列初值是实际启动 PD target。
+转换后立即提交 PD target。下一 tick 的 action history 填实际已生效的 PD target，不填尚未生效的预测或实测关节角。
 
-启动时只 reset 一次：传感器历史和延迟 padding 重复第一帧实测 gravity/gyro/q-minus-nominal/qdot；动作历史重复实际启动 target-minus-nominal。qdot 不强制清零。切换技能和更新篮筐参数不 reset 历史，也不停止网络推理。
+启动时只 reset 一次：传感器历史 重复第一帧实测 gravity/gyro/q-minus-nominal/qdot；动作历史重复实际启动 target-minus-nominal。qdot 不强制清零。切换技能和更新篮筐参数不 reset 历史，也不停止网络推理。
 
 ## 持续运行与多次投篮
 
@@ -123,7 +123,7 @@ for tick in range(num_ticks):
 
 接口允许持续切换，但现有训练仍按 episode 固定 command 和 hoop，没有连续多次投篮的验证结论。投篮间更新避免了投篮中条件突变，但 hold/shoot 切换后的状态分布和连续执行表现仍需单独验证；本次调整没有修改训练观测或网络权重。
 
-硬件本身已有的观测/动作延迟不应重复施加。传感器延迟可通过 StudentObservationState 的 sensor_delay_steps 参数覆盖，匹配训练使用的总延迟。
+部署观测构建器和导出策略的仿真播放均不添加人工延迟；读取旧配置时也不会恢复其中的延迟。训练中的延迟随机化仍保留。
 
 ## 验收
 

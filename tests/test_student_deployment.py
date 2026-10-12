@@ -8,9 +8,9 @@ from test_student_observations import make_sensor
 
 
 @pytest.mark.parametrize('delay', [0, 1, 3])
-def test_robot_observation_builder_matches_simulation(delay):
-    sim, env, data, action = make_sensor(nominal=delay, maximum=3)
-    sim.delay_steps[:] = delay
+def test_robot_observation_builder_ignores_legacy_delay(delay):
+    sim, env, data, action = make_sensor(nominal=0, maximum=3)
+    sim.delay_steps[:] = 0
     data.projected_gravity_b[:, 2] = -1
     meta = dict(command_dimension=3, history_length=5, default_observation_delay_steps=delay,
                 nominal_joint_position=[0.] * 29, safe_lower_joint_position=[-100.] * 29,

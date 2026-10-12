@@ -14,11 +14,11 @@ from rsl_rl.modules import StudentTeacher
 from rsl_rl.networks import MLP
 
 from bb_mimic_nt.student import (
-    STUDENT_ACTION_DIM, STUDENT_OBSERVATION_DIM, student_delay_bounds, student_observation_fields,
+    STUDENT_ACTION_DIM, STUDENT_OBSERVATION_DIM, student_observation_fields,
 )
 from bb_mimic_nt.student_deployment import (
     build_deployment_contract, compact_student_config, student_observation_scales,
-    student_sensor_delay, student_simulation_skill_config,
+    student_simulation_skill_config,
 )
 
 
@@ -302,6 +302,13 @@ def student_load_policy(weights: Path, config: Path | None, device: str) -> tupl
 
 
 def student_apply_deployment_config(env_cfg, metadata: dict) -> None:
+    # Deployment always consumes current samples and applies targets immediately.
+    env_cfg.student_observation.delay_nominal_steps = 0
+    env_cfg.student_observation.delay_min_steps = 0
+    env_cfg.student_observation.delay_max_steps = 0
+    env_cfg.student_observation.randomize_delay = False
+    env_cfg.dr.delay_nominal_steps = 0
+    env_cfg.dr.delay_max_offset_steps = 0
     if "observation" in metadata:
         motion_cfg = env_cfg.commands.motion
         simulation_config = getattr(motion_cfg, 'skills_config', None)
@@ -309,11 +316,7 @@ def student_apply_deployment_config(env_cfg, metadata: dict) -> None:
             from .skills import load_skill_config
             simulation_config = load_skill_config(motion_cfg.skills_path)
         motion_cfg.skills_config = student_simulation_skill_config(metadata, simulation_config)
-        delay = student_sensor_delay(metadata)
         env_cfg.student_observation.history_length = metadata["history_length"]
-        env_cfg.student_observation.delay_nominal_steps = delay
-        env_cfg.student_observation.delay_min_steps = delay
-        env_cfg.student_observation.delay_max_steps = delay
         for name, value in student_observation_scales(metadata).items():
             if name == "skill_command":
                 continue
@@ -325,8 +328,6 @@ def student_apply_deployment_config(env_cfg, metadata: dict) -> None:
                 value = radius
             setattr(env_cfg.student_observation.scales, name, float(value))
         env_cfg.student_observation.enable_noise = False
-        env_cfg.student_observation.randomize_delay = False
-        env_cfg.dr.delay_nominal_steps = metadata["action"]["delay_steps"]
         # The simulation consumes the exact exported coordinates/limits; it
         # does not reconstruct them from Teacher residual adapter parameters.
         for name in ("nominal_joint_position", "safe_lower_joint_position", "safe_upper_joint_position"):
@@ -337,24 +338,15 @@ def student_apply_deployment_config(env_cfg, metadata: dict) -> None:
         env_cfg.commands.motion.skills_config = contract["skills"]["config"]
     settings = metadata["observation_settings"]
     env_cfg.student_observation.history_length = metadata["history_length"]
-    nominal = settings["delay_nominal_steps"]
-    offset = settings.get("delay_max_offset_steps", 0)
-    minimum = settings.get("delay_min_steps", max(0, nominal - offset))
-    maximum = settings.get("delay_max_steps", nominal + offset)
-    student_delay_bounds(nominal, minimum, maximum)
-    env_cfg.student_observation.delay_min_steps = minimum
-    env_cfg.student_observation.delay_max_steps = maximum
     env_cfg.student_observation.scales.hoop_theta = float(
         settings["scales"].get("hoop_theta", settings["scales"].get("hoop_position", 0.25))
     )
     for name, value in settings["scales"].items():
         setattr(env_cfg.student_observation.scales, name, float(value))
-    for name in ("delay_nominal_steps", "gravity_noise_std", "angular_velocity_noise_std",
+    for name in ("gravity_noise_std", "angular_velocity_noise_std",
                  "joint_position_noise_std", "joint_velocity_noise_std"):
         setattr(env_cfg.student_observation, name, settings[name])
     env_cfg.student_observation.enable_noise = False
-    env_cfg.student_observation.randomize_delay = False
-    env_cfg.dr.delay_nominal_steps = int(metadata["default_action_delay_steps"])
     for name, value in metadata["action_adapter"].items():
         setattr(env_cfg.actions.joint_pos, name, value)
 

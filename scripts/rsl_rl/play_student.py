@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Interactively play a Student, optionally by skill, with its configured fixed delays."""
+"""Interactively play a Student, optionally by skill, without artificial sensor or action delays."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ parser.add_argument(
 parser.add_argument("--random-init", action="store_true", help="Enable reset joint position/velocity noise.")
 parser.add_argument(
     "--domain-randomization", action="store_true",
-    help="Enable full-strength physical randomization, action-delay sampling, and pushes.",
+    help="Enable full-strength physical randomization and pushes.",
 )
 parser.add_argument("--real-time", action="store_true")
 parser.add_argument("--ignore-failures", action="store_true")
