@@ -302,7 +302,7 @@ class UnifiedRewardCfg:
 
     hand_contact_distance: float = 0.02
     hand_contact_sensitivity: float = 1.0
-    foot_contact_sensitivity: float = 1.0
+    foot_contact_sensitivity: float = 0.0
     hand_contact_force: float = 1.0
     foot_contact_force: float = 5.0
     foot_airborne_height_tolerance: float = 0.0

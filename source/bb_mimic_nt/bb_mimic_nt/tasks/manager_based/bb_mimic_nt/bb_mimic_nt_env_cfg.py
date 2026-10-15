@@ -261,11 +261,11 @@ class TerminationsCfg:
         params={"tolerance": 0.01},
     )
     non_finite_state = DoneTerm(func=mdp.non_finite_state)
-    root_tracking_error = DoneTerm(func=mdp.root_tracking_error, params={"maximum_error": 0.75})
+    root_tracking_error = DoneTerm(func=mdp.root_tracking_error, params={"maximum_error": 1.0})
     dof_tracking_error = DoneTerm(func=mdp.reference_dof_error, params={"maximum_rmse": 1.0})
     interaction_tracking_error = DoneTerm(
         func=mdp.interaction_tracking_error,
-        params={"maximum_distance": 0.12},
+        params={"maximum_distance": 0.35},
     )
 
 
