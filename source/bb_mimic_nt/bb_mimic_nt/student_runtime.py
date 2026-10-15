@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -89,12 +90,13 @@ def student_apply_teacher_config(env_cfg, checkpoint: Path) -> tuple[dict, dict]
         setattr(env_cfg.dr, name, teacher_dr[name])
     env_cfg.dr.push_force_max_n = tuple(teacher_dr["push_force_max_n"])
     env_cfg.dr.push_force_min_n = tuple(teacher_dr.get("push_force_min_n", (0.0, 0.0, 0.0)))
-    for prefix in ("push", "global_push", "object_push"):
-        for suffix in ("probability", "force_min_n", "force_max_n", "torque_max_nm", "duration_s", "link_weights"):
+    for prefix in ("push", "global_push", "object_push", "velocity_push"):
+        for suffix in ("probability", "force_min_n", "force_max_n", "torque_max_nm", "duration_s",
+                       "link_weights", "interval_range_s", "linear_max_m_s", "angular_max_rad_s"):
             key = f"{prefix}_{suffix}"
             if key in teacher_dr:
                 value = teacher_dr[key]
-                if suffix in ("force_min_n", "force_max_n"):
+                if suffix in ("force_min_n", "force_max_n", "interval_range_s"):
                     value = tuple(value)
                 elif suffix == "link_weights":
                     value = dict(value)
@@ -106,10 +108,31 @@ def student_apply_teacher_config(env_cfg, checkpoint: Path) -> tuple[dict, dict]
     if not teacher_motion.get("skills_config"):
         raise ValueError("Teacher checkpoint uses an incompatible observation contract; train a new multi-skill Teacher.")
     for name in (
-        "skills_path", "skills_config", "urdf_path",
-        "reset_dof_pos_noise", "reset_dof_vel_noise", "default_clip_id",
+        "skills_path", "skills_config", "urdf_path", "default_clip_id",
     ):
         setattr(env_cfg.commands.motion, name, teacher_motion[name])
+    initial_state = getattr(env_cfg.dr, "init_state", None)
+    random_init_enabled = bool(getattr(initial_state, "enabled", True))
+    archived_initial_state = teacher_dr.get("init_state")
+    if archived_initial_state is None:
+        # Select the legacy reset path only for archives that predate HumanX noise.
+        env_cfg.dr.init_state = None
+    else:
+        if initial_state is None:
+            initial_state = SimpleNamespace()
+            env_cfg.dr.init_state = initial_state
+        initial_state.enabled = random_init_enabled and bool(archived_initial_state.get("enabled", True))
+        for name in ("dof_pos", "dof_vel", "root_pos", "root_rot", "root_vel", "root_ang_vel", "object_pos"):
+            source = archived_initial_state[name]
+            component = getattr(initial_state, name, SimpleNamespace(enabled=True))
+            component_enabled = component.enabled
+            for key, value in source.items():
+                setattr(component, key, value)
+            component.enabled = component_enabled and bool(source.get("enabled", True))
+            setattr(initial_state, name, component)
+    for name in ("reset_dof_pos_noise", "reset_dof_vel_noise"):
+        legacy_noise = teacher_motion.get(name, 0.0) if archived_initial_state is None and random_init_enabled else 0.0
+        setattr(env_cfg.commands.motion, name, legacy_noise)
     return agent, environment
 
 

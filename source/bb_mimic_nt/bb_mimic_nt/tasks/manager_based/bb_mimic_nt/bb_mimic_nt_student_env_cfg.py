@@ -51,6 +51,7 @@ class StudentDomainRandomizationCfg(DomainRandomizationCfg):
     push: StudentPushScheduleCfg = StudentPushScheduleCfg()
     global_push: StudentPushScheduleCfg = StudentPushScheduleCfg()
     object_push: StudentPushScheduleCfg = StudentPushScheduleCfg()
+    velocity_push: StudentPushScheduleCfg = StudentPushScheduleCfg()
 
 
 @configclass
@@ -144,17 +145,24 @@ class G1ShootStudentPlayEnvCfg(G1ShootStudentEnvCfg):
         self.commands.motion.randomize_clip = False
         self.commands.motion.reset_dof_pos_noise = 0.0
         self.commands.motion.reset_dof_vel_noise = 0.0
+        if self.dr.init_state is not None:
+            self.dr.init_state.enabled = False
         self.student_observation.enable_noise = False
         self.student_observation.randomize_delay = False
-        for name in ("delay", "ball_mass", "pd_gains", "hand_friction", "foot_friction", "link_mass", "push", "global_push", "object_push"):
+        for name in ("delay", "ball_mass", "pd_gains", "hand_friction", "foot_friction", "link_mass",
+                     "push", "global_push", "object_push", "velocity_push"):
             getattr(self.dr, name).enabled = False
 
     def configure_randomization(self, *, random_init: bool = False, domain_randomization: bool = False) -> None:
-        """Opt into reset noise and full-strength physical DR independently."""
+        """Opt into HumanX initial-state noise and full-strength physical DR independently."""
         training_cfg = G1ShootStudentEnvCfg()
+        if self.dr.init_state is not None:
+            self.dr.init_state.enabled = random_init and training_cfg.dr.init_state.enabled
         for name in ("reset_dof_pos_noise", "reset_dof_vel_noise"):
-            setattr(self.commands.motion, name, getattr(training_cfg.commands.motion, name) if random_init else 0.0)
-        for name in ("delay", "ball_mass", "pd_gains", "hand_friction", "foot_friction", "link_mass", "push", "global_push", "object_push"):
+            legacy_noise = getattr(training_cfg.commands.motion, name) if random_init and self.dr.init_state is None else 0.0
+            setattr(self.commands.motion, name, legacy_noise)
+        for name in ("delay", "ball_mass", "pd_gains", "hand_friction", "foot_friction", "link_mass",
+                     "push", "global_push", "object_push", "velocity_push"):
             schedule = getattr(self.dr, name)
             schedule.enabled = domain_randomization and getattr(training_cfg.dr, name).enabled
             schedule.full_strength = domain_randomization

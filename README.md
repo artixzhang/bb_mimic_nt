@@ -83,7 +83,7 @@ PPO 每轮 iteration 先收集 `NUM_ENVS * num_steps_per_env` 条 transition，�
 
 ## Domain Randomization
 
-每次环境 reset 独立采样，直到下次 reset 保持不变。`env_cfg.dr` 为各项 DR 分别提供 `enabled`、`start_fraction` 和 `end_fraction`，并集中配置标称值、采样幅度和推力持续时间；默认在训练进度 20% 前使用标称值，20%–60% 通过 cubic smoothstep S 曲线平滑扩大范围，课程起止点斜率均为零。六维特权观测依次为延迟、篮球质量、PD 比例、手部摩擦、脚部摩擦、腿部及骨盆 link 质量比例，按完整范围映射到 [-1, 1]，标称值均为 0。
+物理参数和 delay 在每次环境 reset 时独立采样，并保持到下次 reset；Push 则跨 episode 按仿真时间循环触发。配置集中在 `env_cfg.dr`。Teacher 物理参数课程在训练进度 10%–60% 经 cubic smoothstep 从标称值扩大至完整范围；Student 为 5%–25%。六维特权观测仍依次为延迟、篮球质量、PD 比例、手部摩擦、脚部摩擦、腿部及骨盆 link 质量比例，维度和编码不变。
 
 | 项目 | 标称值 | 完整采样范围 |
 | --- | ---: | ---: |
@@ -93,21 +93,49 @@ PPO 每轮 iteration 先收集 `NUM_ENVS * num_steps_per_env` 条 transition，�
 | 双手静、动摩擦 | 0.8 | 0.6–1.0 |
 | 双脚静、动摩擦 | 0.9 | 0.6–1.2 |
 | 骨盆及八个髋/膝 link 质量 | 各 link 默认质量 | 共用比例 ±10%，惯量同比例变化 |
-| 三类 Push 外力和力矩（各自独立配置） | 0 | 默认世界坐标 X/Y 幅值 8–20 N、Z 幅值 5–10 N，随机正负；力矩各轴 ±5 Nm；最长 800 ms |
 
-延迟由 `env_cfg.dr.delay_nominal_steps`（默认 0）和 `delay_max_offset_steps`（默认 2）控制。课程半径为 `floor(delay_max_offset_steps * strength)`，reset 时在 `[max(0, nominal-radius), nominal+radius]` 内均匀采样整数步，负下界先截为 0；不会先采样负数再将样本裁成 0。延迟课程在训练进度 30%–70% 扩大范围：固定 0 → 0–1 → 0–2 步。标称值是课程起点和播放值，完整均匀分布的中位数为 1 步。要改为标称 1、采样 0–2 步，设为 `1, 1`；固定零延迟设为 `0, 0`。延迟特权观测通式为 `(steps-nominal)/max(offset, 1)`。
+### 渐变 Delay
 
-三类 Push 每个 episode 各独立抽取一次是否触发（默认概率 0.8），各最多触发一个脉冲，可以同时发生。`dr.push.enabled`、`dr.global_push.enabled`、`dr.object_push.enabled` 分别控制开关，训练默认均开启。Teacher 三者默认沿用 Push 的 15%–80% smoothstep 课程；Student 三者沿用 Student Push 的 10%–35% 课程。力、力矩在 reset 时按课程强度缩放，概率不随课程缩放。
+动作延迟由 `dr.delay_nominal_steps`（默认 0）和 `dr.delay_max_offset_steps`（默认 2）控制。每次 reset 先在完整范围 `[max(0, nominal-offset), nominal+offset]` 均匀采样整数 `D`，再计算 `x = nominal + strength * (D - nominal)`，以 `x` 的小数部分为概率向上取整，否则向下取整。强度为 0 时全部为 nominal，为 1 时完整范围均匀分布，中间各档延迟的概率连续变化。例如默认范围在强度 0.1 时，约 90% 为 0 步、10% 为 1 步；不会在整数半径阈值处突然引入大批延迟样本。
 
-- `push`：由逐帧 `push_available` 控制机器人推力。
-- `global_push`：忽略 `push_available`，从本次剩余的动作段和末帧保持全时间段采样一次。
-- `object_push`：由逐帧 `obj_push` 控制，自动作用于轨迹物体 `ball`。
+动作 delay 的 Teacher 课程仍为 30%–70%，Student 为 10%–30%。Student 观测 delay 使用相同采样算法，保留独立的 0%–20% 课程、nominal=1 和完整范围 0–3 步。每个 episode 内 delay 不变。动作延迟特权观测仍为 `(steps-nominal)/max(offset, 1)`；关闭随机化时固定 nominal。要配置标称 1、完整范围 0–2 步，设动作 delay 参数为 `1, 1`；固定零延迟设为 `0, 0`。
 
-采样按参考时间均匀进行，动作段自适应速度会改变实际触发时刻；RSI 之前的时间不参与采样。末帧保持沿用末帧的可推标记。门控关闭或进入 DONE 时立即结束对应脉冲，结束后不再重触发。80% 是 episode 的独立抽取概率；没有可用时段、课程强度为零或 episode 提前结束时，实际遇到 Push 的比例可能更低。
+### 循环 Push
 
-每类用 `<类型>_force_min_n`、`<类型>_force_max_n`、`<类型>_torque_max_nm`、`<类型>_duration_s`、`<类型>_probability` 单独配置，例如 `global_push_force_max_n`。机器人两类用 `push_link_weights` / `global_push_link_weights` 指定精确 link 名和相对权重，例如 `{"torso_link": 3.0, "pelvis": 1.0}`；每类每次只选一个 link，默认 `{"torso_link": 1.0}`。同一 link 上的两类力和力矩相加。三类共用 `EventsCfg.push` 的逐策略步事件，以一次合成写入避免覆盖；独立开关放在 `dr`，无需增加多个互相覆盖的事件。
+四类 Push 各自独立配置、计时和采样，可同时发生，训练默认均开启。`dr.<类型>.enabled` 控制开关，`dr.<类型>_interval_range_s` 控制间隔，默认均为连续均匀 `(1.0, 5.0)` 秒。与 HumanX 一样，计时跨 episode 保留：仅环境首次初始化时采样首次间隔，之后每次有效触发机会结束时，从当前仿真时刻重新采样下一间隔；episode reset 只清除活动脉冲和外力，保留下一触发时间以及已到期等待门控的机会。因此新 episode 可以在不足 1 秒时触发，只有环境首次启动需要等待完整首个间隔。计时不受 RSI 起始帧和自适应动作速度影响。这里保留连续采样，HumanX 的 `randint(1,5)` 则采样整数 1、2、3、4 秒。Teacher 三类外力使用各自的 15%–80% smoothstep 课程，速度 Push 为 0%–50%；Student 四者均为 10%–35%。幅度在每次命中时按当时课程强度重新采样。
 
-缓存 schema 已升级至 7，预处理要求 `obj_push` 为逐帧 bool/0/1；旧缓存会自动判为过期，需由更新后的原始数据重建。录制脚本也逐帧保留此字段。播放和评估默认关闭三类 Push。
+| 类型 | 门控 | 每次机会命中概率 | 满强度幅度和持续时间 |
+| --- | --- | ---: | --- |
+| `push` | 逐帧 `push_available` | 0.8 | XYZ 力幅值 0–70 / 0–70 / 0–50 N；各轴力矩 ±5 Nm；0.1 s |
+| `global_push` | 无轨迹门控 | 0.8 | 各轴力幅值 0–10 N；各轴力矩 ±2 Nm；0.3 s |
+| `object_push` | 逐帧 `obj_push` | 0.6 | 各轴力幅值 0–3 N；无力矩；0.1 s |
+| `velocity_push` | 无轨迹门控 | 1.0 | 各轴线速度增量 ±0.5 m/s、角速度增量 ±0.52 rad/s；瞬时叠加 |
+
+力的符号按轴随机。门控关闭时，已到期的机会等待重新允许，不累计补发；门控允许后独立抽取一次概率，未命中也重采样间隔。末帧保持沿用末帧门控。门控关闭、开关禁用或进入 DONE 时立即清除对应的活动脉冲，保留计时。间隔是机会间隔，实际 Push 次数受概率、门控和课程强度影响；短 episode 连续 reset 不会推迟已采样的触发时间。
+
+三类外力仍使用 `<类型>_force_min_n`、`<类型>_force_max_n`、`<类型>_torque_max_nm`、`<类型>_duration_s` 和 `<类型>_probability`。间隔下界不得小于本类脉冲时长，时长必须是策略步长的正整数倍。机器人两类外力分别用 `push_link_weights` / `global_push_link_weights` 指定目标 link 权重，默认 `{"torso_link": 0.5, "pelvis": 0.5}`，每次命中重新选择一个 link；作用于同一 link 的力与力矩相加。
+
+速度 Push 直接向当前世界坐标根 link 速度叠加增量，不覆盖当前速度，也不改写外力缓冲。范围分别由 `velocity_push_linear_max_m_s` 和 `velocity_push_angular_max_rad_s` 控制。四类共享逐策略步驱动事件，各自保留独立状态，外力统一合成写入。
+
+### HumanX 初始状态随机化
+
+`dr.init_state.enabled` 是总开关，每个分量另有独立的 `.enabled`。Teacher 和 Student 均对每次 reset 从训练开始使用满强度，与 HumanX HOI 的固定 `noise_to_initial_level=1.0` 一致，不附加渐变课程。
+
+| 分量 | 幅度配置 | 分布 |
+| --- | --- | --- |
+| `dof_pos` | `.std=0.1` | 关节位置高斯噪声，rad |
+| `dof_vel` | `.std=0.01` | 关节速度高斯噪声，rad/s |
+| `root_pos` | `.std=0.02` | 根 XYZ 位置高斯噪声，m |
+| `root_rot` | `.max_angle_deg=10.0` | 随机单位轴，角度均匀采样 0–10° |
+| `root_vel` | `.std=0.05` | 根 XYZ 线速度高斯噪声，m/s |
+| `root_ang_vel` | `.std=0.02` | 根 XYZ 角速度高斯噪声，rad/s |
+| `object_pos` | `.half_range_m=0.1` | 球 XY 各均匀采样 ±0.1 m，Z 不变 |
+
+例如 `env_cfg.dr.init_state.root_rot.enabled = False` 只关闭根旋转随机化。扰动加在 RSI/参考帧选定后的模拟器初态副本上，参考轨迹不变；旋转噪声左乘参考姿态，关节位置保留机械限位裁剪。球的姿态和速度、篮筐状态保持参考值。动作和观测历史从最终实际初态初始化。
+
+新配置中的旧 `commands.motion.reset_dof_pos_noise/reset_dof_vel_noise` 默认为 0。只在 `dr.init_state` 缺失或为 `None` 的旧 Teacher 兼容路径使用它们，不与新噪声叠加；关闭 `init_state.enabled` 不会恢复旧噪声。Student 继承 Teacher 的幅度和间隔，同时保留自己的课程与播放开关；旧 Teacher 未记录速度 Push 时默认关闭该项。
+
+播放和评估默认关闭四类 Push 及全部初态随机化。课程日志新增速度 Push 强度和各初态分量的有效开关状态。缓存 schema 仍为 7，逐帧 `push_available` / `obj_push` 数据语义不变。
 
 
 TensorBoard 除 reward/termination 外，还记录 `Metrics/motion/error/*` 的原始 reference tracking error，以及 `Metrics/motion/control/*` 的 action 变化、PD target 变化、action 饱和率、关节速度和力矩占比。`error/joint/*` 与 `control/joint/*` 提供逐关节误差和动作幅度。这些指标带有物理单位，适合排查 reward 上升但动作抖动的问题。
@@ -203,7 +231,7 @@ python scripts/rsl_rl/train_dagger.py \
   --headless
 ```
 
-Teacher 的网络结构、动作契约与逐关节缩放、DR 范围、技能配置与参考轨迹、末帧保持 和 reset 关节噪声从所选 checkpoint 的 `params/` 读取。Student 使用逐技能 RSI 开关，关闭自适应速度。训练前即写出 `params/env.yaml`、`params/agent.yaml` 和 `params/student_config.json`；每个 `model_*.pt` 都包含独立导出所需的模型结构与部署 metadata。默认每轮收集 48 步并更新 32 次，batch size 跟随 `NUM_ENVS`（当前 8192）；回放容量由 `training.py` 按 `2 * NUM_ENVS * max(32, DAGGER_STEPS_PER_ENV)` 推导，当前为 786432，一半保存最新 FIFO 状态、一半作为会持续更新的全历史 reservoir。8192 个环境时 recent 可容纳完整 48 步；471 维输入加 29 维标签时两分区合计约占 1.57 GB（1.46 GiB）显存，每个 batch 默认 75% 采样最新状态，保留最新闭环状态与历史覆盖。这些是默认配置的联动计算；若通过 CLI/Hydra 单独覆盖环境数或 rollout，请相应检查 `--replay-capacity` 和 `--batch-size`。回放数据常驻训练 device，避免 rollout 期间 CPU/GPU 往返；如需在恢复训练时连同回放集恢复，可添加 `--save-replay`。
+Teacher 的网络结构、动作契约与逐关节缩放、DR 范围、技能配置与参考轨迹、末帧保持和初态随机化配置从所选 checkpoint 的 `params/` 读取。Student 使用逐技能 RSI 开关，关闭自适应速度。训练前即写出 `params/env.yaml`、`params/agent.yaml` 和 `params/student_config.json`；每个 `model_*.pt` 都包含独立导出所需的模型结构与部署 metadata。默认每轮收集 48 步并更新 32 次，batch size 跟随 `NUM_ENVS`（当前 8192）；回放容量由 `training.py` 按 `2 * NUM_ENVS * max(32, DAGGER_STEPS_PER_ENV)` 推导，当前为 786432，一半保存最新 FIFO 状态、一半作为会持续更新的全历史 reservoir。8192 个环境时 recent 可容纳完整 48 步；471 维输入加 29 维标签时两分区合计约占 1.57 GB（1.46 GiB）显存，每个 batch 默认 75% 采样最新状态，保留最新闭环状态与历史覆盖。这些是默认配置的联动计算；若通过 CLI/Hydra 单独覆盖环境数或 rollout，请相应检查 `--replay-capacity` 和 `--batch-size`。回放数据常驻训练 device，避免 rollout 期间 CPU/GPU 往返；如需在恢复训练时连同回放集恢复，可添加 `--save-replay`。
 
 Direct action 需要从头训练：旧 residual Teacher、旧弧度 Student、旧 replay 和导出包均被契约校验拒绝，即使观测/动作维数相同。Teacher 归档必须保留 `params/policy_contract.json`；新 Student checkpoint 内嵌契约，导出包使用 deployment v4 和 `joint_action` 输出。DAgger 日志增加每关节目标 MAE、Student/Teacher 目标逐步变化 RMS、目标变化差、失败回合比例与回合步数；动作变化指标排除跨 reset 的跳变，均以 rad 为单位。
 
@@ -240,7 +268,7 @@ python scripts/rsl_rl/export_student.py \
 
 部署交付只需 `student_config.json` 与 `student_policy.onnx`；配置无版本标记，记录 ONNX 输入输出、观测顺序/缩放、关节顺序、nominal pose、安全限位、PD 参数、固定标称延迟和 `export_source`。多技能通过 `skills.command` 定义 one-hot 编码，通过 `skills.definitions` 明确技能名、command ID、可选 motion profiles、初始化及 end 规则；每个 profile 包含篮筐初始柱坐标，切换技能需要重新初始化并重置历史。训练采样权重和 RSI 不进入部署配置。导出目录还保留 `student_weights.pt`、TorchScript、校验向量和 manifest，用于本项目重放与验收。成对评估对相同 clip 分别运行 Teacher 与 Student，输出篮球首次触地相对篮筐的水平落点和最高高度。
 
-Student Play 默认关闭 reset 关节位置/速度扰动和域随机化，同一 clip 每次从参考初始状态重启。需要测试扰动时，在 `play_student.py` 命令中添加 `--random-init`（开启训练配置中的 reset 关节噪声）或 `--domain-randomization`（开启完整强度的物理参数随机化、动作延迟采样和推力），两者可独立使用或同时开启。观测噪声仍关闭，观测延迟仍使用导出配置的固定值；RSI 和随机 clip 仍关闭。
+Student Play 默认关闭全部初态扰动和域随机化，同一 clip 每次从参考初始状态重启。需要测试扰动时，在 `play_student.py` 命令中添加 `--random-init`（开启训练配置中的全部 HumanX 初态随机化）或 `--domain-randomization`（开启完整强度的物理参数随机化、动作延迟采样、三类外力和独立速度 Push），两者可独立使用或同时开启。观测噪声仍关闭，观测延迟仍使用导出配置的固定值；RSI 和随机 clip 仍关闭。
 
 Student 真机导出流程、技能 command/初始化契约和参考观测构造器见 [部署说明](docs/student_deployment.md)。
 

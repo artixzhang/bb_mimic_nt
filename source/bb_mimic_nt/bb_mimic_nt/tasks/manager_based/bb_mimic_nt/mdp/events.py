@@ -51,14 +51,46 @@ class _MassCache:
 PUSH_TYPES = ("push", "global_push", "object_push")
 
 
-class PushPulse:
-    """Independent episode draw, target, and pulse lifetime for one perturbation."""
+class _PushSchedule:
+    """An independent simulation-time renewal timer that spans episode resets."""
+
+    def __init__(self, env, name):
+        self.name = name
+        self.schedule = getattr(env.cfg.dr, name)
+        self.probability = getattr(env.cfg.dr, f"{name}_probability")
+        self.interval_range_s = getattr(env.cfg.dr, f"{name}_interval_range_s", (1.0, 5.0))
+        if not math.isfinite(self.probability) or not 0 <= self.probability <= 1:
+            raise ValueError(f"{name}: probability must be finite and in [0, 1].")
+        if len(self.interval_range_s) != 2 or any(not math.isfinite(v) for v in self.interval_range_s):
+            raise ValueError(f"{name}: expected two finite interval limits.")
+        low, high = self.interval_range_s
+        if not 0 < low <= high:
+            raise ValueError(f"{name}: interval limits must satisfy 0 < min <= max.")
+        # Float64 preserves sub-step resolution even in long training runs.
+        self.next_trigger_s = torch.full((env.num_envs,), float("inf"), device=env.device, dtype=torch.float64)
+        self.selected = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+
+    def reset(self, env_ids):
+        """Clear episode-local state while retaining the next trigger deadline."""
+        self.selected[env_ids] = False
+
+    def reschedule(self, env_ids, now):
+        low, high = self.interval_range_s
+        interval = low + torch.rand(len(env_ids), device=self.next_trigger_s.device, dtype=torch.float64) * (high - low)
+        self.next_trigger_s[env_ids] = now + interval
+
+    def draw(self, env_ids, now, strength):
+        self.selected[env_ids] = (torch.rand(len(env_ids), device=self.next_trigger_s.device) < self.probability) & (strength > 0)
+        self.reschedule(env_ids, now)
+        return env_ids[self.selected[env_ids]]
+
+
+class PushPulse(_PushSchedule):
+    """Independent renewal schedule, target, and lifetime for a force pulse."""
 
     def __init__(self, env, context, name):
+        super().__init__(env, name)
         cfg = env.cfg.dr
-        self.name = name
-        self.schedule = getattr(cfg, name)
-        self.probability = getattr(cfg, f"{name}_probability")
         lower = getattr(cfg, f"{name}_force_min_n")
         upper = getattr(cfg, f"{name}_force_max_n")
         self.torque_max = getattr(cfg, f"{name}_torque_max_nm")
@@ -68,10 +100,12 @@ class PushPulse:
             for lo, hi in zip(lower, upper)
         ):
             raise ValueError(f"{name}: expected finite 0 <= min <= max force limits for x/y/z.")
-        if not 0 <= self.probability <= 1 or not math.isfinite(self.torque_max) or self.torque_max < 0:
-            raise ValueError(f"{name}: invalid probability or torque limit.")
+        if not math.isfinite(self.torque_max) or self.torque_max < 0:
+            raise ValueError(f"{name}: invalid torque limit.")
         if not math.isfinite(duration) or duration <= 0:
             raise ValueError(f"{name}: duration must be positive and finite.")
+        if self.interval_range_s[0] < duration:
+            raise ValueError(f"{name}: minimum interval must be at least the pulse duration.")
         self.pulse_steps = round(duration / env.step_dt)
         if self.pulse_steps < 1 or not math.isclose(self.pulse_steps * env.step_dt, duration, abs_tol=1e-8):
             raise ValueError(f"{name}: duration must be a positive multiple of the policy step time.")
@@ -87,23 +121,39 @@ class PushPulse:
         self.force = torch.zeros((env.num_envs, 3), device=env.device)
         self.torque = torch.zeros_like(self.force)
         self.body = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
-        self.target = torch.full((env.num_envs,), float("inf"), device=env.device)
         self.steps_left = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
-        self.used = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
-        self.applied = torch.zeros_like(self.used)
-        self.selected = torch.zeros_like(self.used)
+        self.applied = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
 
-    def reset(self, env_ids, strength):
+    def reset(self, env_ids):
+        super().reset(env_ids)
+        self.force[env_ids] = 0
+        self.torque[env_ids] = 0
+        self.steps_left[env_ids] = 0
+        self.applied[env_ids] = False
+
+    def sample_wrench(self, env_ids, strength):
         count = len(env_ids)
         device = self.force.device
         self.force[env_ids] = _uniform_signed(count, self.force_min, self.force_max, strength, device)
         self.torque[env_ids] = (2 * torch.rand((count, 3), device=device) - 1) * self.torque_max * strength
         self.body[env_ids] = self.body_ids[torch.multinomial(self.weights, count, replacement=True)]
-        self.selected[env_ids] = (torch.rand(count, device=device) < self.probability) & (strength > 0)
-        self.target[env_ids] = float("inf")
-        self.steps_left[env_ids] = 0
-        self.used[env_ids] = False
-        self.applied[env_ids] = False
+
+
+class VelocityPush(_PushSchedule):
+    """Instantaneous root-link velocity increments, independent of force pulses."""
+
+    def __init__(self, env):
+        super().__init__(env, "velocity_push")
+        self.linear_max = env.cfg.dr.velocity_push_linear_max_m_s
+        self.angular_max = env.cfg.dr.velocity_push_angular_max_rad_s
+        if any(not math.isfinite(v) or v < 0 for v in (self.linear_max, self.angular_max)):
+            raise ValueError("velocity_push: velocity limits must be finite and non-negative.")
+
+    def apply(self, robot, env_ids, strength):
+        velocity = robot.data.root_link_vel_w[env_ids].clone()
+        limit = velocity.new_tensor([self.linear_max] * 3 + [self.angular_max] * 3)
+        velocity += (2 * torch.rand_like(velocity) - 1) * limit * strength
+        robot.write_root_link_velocity_to_sim(velocity, env_ids=env_ids)
 
 
 class DomainRandomizationContext:
@@ -140,6 +190,7 @@ class DomainRandomizationContext:
         self.foot_friction = torch.full((count,), cfg.foot_friction_nominal, device=device)
         self.link_mass_scale = torch.ones(count, device=device)
         self.pushes = {name: PushPulse(env, self, name) for name in PUSH_TYPES}
+        self.velocity_push = VelocityPush(env) if getattr(cfg, "velocity_push", None) is not None else None
         self.robot_push_bodies = sorted(set(
             self.pushes["push"].body_ids.tolist() + self.pushes["global_push"].body_ids.tolist()
         ))
@@ -206,6 +257,30 @@ def training_policy_steps(env) -> float:
     context = getattr(env, "dr_context", None)
     offset = 0 if context is None else context.iteration_offset * env.cfg.dr.steps_per_iteration
     return offset + env.common_step_counter
+
+
+def sample_delay_steps(
+    count: int, nominal: int, minimum: int, maximum: int, strength: float, device
+) -> torch.Tensor:
+    """Contract a full-range integer draw toward nominal, then round without bias.
+
+    Each delay's probability varies continuously with curriculum strength, including
+    where a new integer becomes reachable. The final distribution is uniform.
+    """
+    if any(not isinstance(value, int) for value in (nominal, minimum, maximum)):
+        raise ValueError("Delay steps must be integers.")
+    if not 0 <= minimum <= nominal <= maximum:
+        raise ValueError("Delay steps must satisfy 0 <= minimum <= nominal <= maximum.")
+    if not math.isfinite(strength) or not 0 <= strength <= 1:
+        raise ValueError("Delay curriculum strength must be finite and in [0, 1].")
+    if strength == 0 or minimum == maximum:
+        return torch.full((count,), nominal, device=device, dtype=torch.long)
+    final = torch.randint(minimum, maximum + 1, (count,), device=device)
+    if strength == 1:
+        return final
+    interpolated = nominal + strength * (final.float() - nominal)
+    lower = interpolated.floor()
+    return (lower + (torch.rand_like(interpolated) < interpolated - lower)).long()
 
 
 def _uniform_scale(count: int, half_range: float, strength: float, device: str) -> torch.Tensor:
@@ -283,11 +358,9 @@ def reset_domain_randomization(env, env_ids: torch.Tensor):
     }
     count = len(env_ids)
     device = env.device
-    delay_radius = math.floor(cfg.delay_max_offset_steps * strength["delay"] + 1.0e-6)
-    delay_low = max(0, cfg.delay_nominal_steps - delay_radius)
-    delay_high = cfg.delay_nominal_steps + delay_radius
-    context.delay_steps[env_ids] = torch.randint(
-        delay_low, delay_high + 1, (count,), device=device
+    context.delay_steps[env_ids] = sample_delay_steps(
+        count, cfg.delay_nominal_steps, max(0, cfg.delay_nominal_steps - cfg.delay_max_offset_steps),
+        cfg.delay_nominal_steps + cfg.delay_max_offset_steps, strength["delay"], device,
     )
     context.ball_mass_scale[env_ids] = _uniform_scale(count, cfg.ball_mass_fraction, strength["ball_mass"], device)
     context.pd_scale[env_ids] = _uniform_scale(count, cfg.pd_gain_fraction, strength["pd_gains"], device)
@@ -299,7 +372,9 @@ def reset_domain_randomization(env, env_ids: torch.Tensor):
     ) * cfg.foot_friction_delta * strength["foot_friction"]
     context.link_mass_scale[env_ids] = _uniform_scale(count, cfg.link_mass_fraction, strength["link_mass"], device)
     for pulse in context.pushes.values():
-        pulse.reset(env_ids, curriculum_strength(pulse.schedule, iteration, cfg.total_iterations))
+        pulse.reset(env_ids)
+    if context.velocity_push is not None:
+        context.velocity_push.reset(env_ids)
     _write_push_wrenches(context, env_ids)
     indices = env_ids.cpu()
     sampled = torch.stack(
@@ -317,50 +392,25 @@ def reset_domain_randomization(env, env_ids: torch.Tensor):
     _set_friction(context, indices, sampled[:, 2:])
 
 
-def _push_clock(motion):
-    """Monotonic reference seconds followed by the final-pose hold."""
-    clock = motion.frame / motion.fps
-    return torch.where(motion.stage >= 1, clock + motion.hold_time, clock)
-
-
 def arm_push(env, env_ids: torch.Tensor):
-    """Draw one target per type over the remaining reference timeline, including holds.
+    """Clear reset pulses and start only timers that have never been armed.
 
-    Holds inherit the endpoint gate. Sampling uses reference time because active
-    motion speed is adaptive and its future physical duration is not yet known.
+    Like HumanX, established timers (including overdue gated opportunities)
+    survive episode resets. Only the first lifetime interval starts at reset.
     """
     if len(env_ids) == 0:
         return
     context = get_dr_context(env)
-    motion = context.motion
-    clips = motion.clip_ids[env_ids]
-    start = _push_clock(motion)[env_ids]
-    last = (motion.lengths[clips] - 1) / motion.fps
-    # The command marks DONE one policy interval before the end of the final-pose hold.
-    post = (motion.end_hold_duration[env_ids] - env.step_dt).clamp_min(0)
-    end = last + post
-    for name, pulse in context.pushes.items():
-        if name == "global_push":
-            target = start + torch.rand_like(start) * (end - start).clamp_min(0)
-            available = end > start
-        else:
-            field = "obj_push" if name == "object_push" else "push_available"
-            allowed = motion._batch[field][clips] > 0.5
-            frames = torch.arange(allowed.shape[1], device=env.device)[None, :]
-            left = torch.maximum(frames / motion.fps, start[:, None].clamp_min(0))
-            right = torch.minimum((frames + 1) / motion.fps, last[:, None])
-            weights = (right - left).clamp_min(0) * allowed
-            post_weight = post * allowed.gather(1, (motion.lengths[clips] - 1)[:, None]).squeeze(1)
-            weights = torch.cat((weights, post_weight[:, None]), dim=1)
-            total = weights.sum(1)
-            rank = torch.rand_like(total) * total
-            cumulative = weights.cumsum(1)
-            index = (cumulative <= rank[:, None]).sum(1).clamp_max(weights.shape[1] - 1)
-            previous = (cumulative - weights).gather(1, index[:, None]).squeeze(1)
-            starts = torch.cat((left, last[:, None]), dim=1)
-            target = starts.gather(1, index[:, None]).squeeze(1) + rank - previous
-            available = total > 0
-        pulse.target[env_ids] = torch.where(pulse.selected[env_ids] & available, target, float("inf"))
+    now = env.common_step_counter * env.step_dt
+    schedules = list(context.pushes.values())
+    if context.velocity_push is not None:
+        schedules.append(context.velocity_push)
+    for schedule in schedules:
+        schedule.reset(env_ids)
+        unarmed_ids = env_ids[torch.isinf(schedule.next_trigger_s[env_ids])]
+        if len(unarmed_ids):
+            schedule.reschedule(unarmed_ids, now)
+    _write_push_wrenches(context, env_ids)
 
 
 def _write_push_wrenches(context, env_ids):
@@ -384,11 +434,12 @@ def _write_push_wrenches(context, env_ids):
 
 
 def advance_push_pulse(env, env_ids: torch.Tensor | None):
-    """Advance all three independent pulses and atomically apply their sum."""
+    """Renew eligible pulse/velocity timers and atomically compose force pulses."""
     context = get_dr_context(env)
     motion = context.motion
     ids = torch.arange(env.num_envs, device=env.device) if env_ids is None else env_ids
-    clock = _push_clock(motion)[ids]
+    now = env.common_step_counter * env.step_dt
+    iteration = context.iteration_offset + env.common_step_counter / env.cfg.dr.steps_per_iteration
     changed = torch.zeros(len(ids), device=env.device, dtype=torch.bool)
     for name, pulse in context.pushes.items():
         allowed = ~motion.motion_done[ids]
@@ -398,13 +449,25 @@ def advance_push_pulse(env, env_ids: torch.Tensor | None):
         allowed &= pulse.schedule.enabled
         remaining = pulse.steps_left[ids]
         remaining[~allowed] = 0
-        due = allowed & ~pulse.used[ids] & (clock >= pulse.target[ids])
-        remaining[due] = pulse.pulse_steps
-        pulse.used[ids[due]] = True
+        due = allowed & (now + 1.0e-12 >= pulse.next_trigger_s[ids])
+        strength = curriculum_strength(pulse.schedule, iteration, env.cfg.dr.total_iterations)
+        hit_ids = pulse.draw(ids[due], now, strength)
+        if len(hit_ids):
+            pulse.sample_wrench(hit_ids, strength)
+        # A new pulse can directly follow the old one, so always rewrite its wrench.
+        hit = due & pulse.selected[ids]
+        remaining[hit] = pulse.pulse_steps
         active = remaining > 0
-        changed |= active != pulse.applied[ids]
+        changed |= (active != pulse.applied[ids]) | hit
         pulse.applied[ids] = active
         pulse.steps_left[ids] = (remaining - active.long()).clamp_min(0)
     changed_ids = ids[changed]
     if len(changed_ids):
         _write_push_wrenches(context, changed_ids)
+    velocity = context.velocity_push
+    if velocity is not None and velocity.schedule.enabled:
+        due = ~motion.motion_done[ids] & (now + 1.0e-12 >= velocity.next_trigger_s[ids])
+        strength = curriculum_strength(velocity.schedule, iteration, env.cfg.dr.total_iterations)
+        hit_ids = velocity.draw(ids[due], now, strength)
+        if len(hit_ids):
+            velocity.apply(context.robot, hit_ids, strength)

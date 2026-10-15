@@ -111,17 +111,37 @@ def test_training_metadata_deploys_without_artificial_delay():
 
 
 @pytest.mark.parametrize('enabled', [True, False])
-def test_teacher_loading_preserves_student_curriculum_and_play_flags(monkeypatch, enabled):
+@pytest.mark.parametrize('modern_archive', [True, False])
+@pytest.mark.parametrize('teacher_init_enabled', [True, False])
+def test_teacher_loading_preserves_student_curriculum_and_play_flags(
+        monkeypatch, enabled, modern_archive, teacher_init_enabled):
+    import copy
     import bb_mimic_nt.student_runtime as runtime
 
-    names = ('delay', 'ball_mass', 'pd_gains', 'hand_friction', 'foot_friction', 'link_mass', 'push')
+    names = ('delay', 'ball_mass', 'pd_gains', 'hand_friction', 'foot_friction', 'link_mass',
+             'push', 'global_push', 'object_push', 'velocity_push')
     ranges = dict(delay_nominal_steps=0, delay_max_offset_steps=2, ball_mass_fraction=.05,
                   pd_gain_fraction=.1, hand_friction_nominal=.8, hand_friction_delta=.2,
                   foot_friction_nominal=.9, foot_friction_delta=.3, link_mass_fraction=.1,
                   push_torque_max_nm=5., push_duration_s=.8,
                   push_force_min_n=(8., 8., 3.), push_force_max_n=(20., 20., 8.))
     archived = dict(ranges)
-    archived.update({name: dict(enabled=True, start_fraction=.15, end_fraction=.8) for name in names})
+    archived.update({name: dict(enabled=True, start_fraction=.15, end_fraction=.8)
+                     for name in (names if modern_archive else names[:-3])})
+    init_components = {
+        name: dict(enabled=True, std=value) for name, value in
+        [('dof_pos', .12), ('dof_vel', .02), ('root_pos', .03), ('root_vel', .06), ('root_ang_vel', .03)]
+    }
+    init_components.update(root_rot=dict(enabled=True, max_angle_deg=12.),
+                           object_pos=dict(enabled=True, half_range_m=.2))
+    init_components['dof_vel']['enabled'] = False
+    if modern_archive:
+        archived['init_state'] = dict(enabled=teacher_init_enabled, **init_components)
+        for prefix in ('push', 'global_push', 'object_push', 'velocity_push'):
+            archived[f'{prefix}_interval_range_s'] = [2., 6.]
+            archived[f'{prefix}_probability'] = .7
+        archived['velocity_push_linear_max_m_s'] = .8
+        archived['velocity_push_angular_max_rad_s'] = .9
     action = dict(action_scale_factor=.25, action_clip=100.)
     from bb_mimic_nt.skills import load_skill_config
     motion = dict(skills_path='skills.yaml', skills_config=load_skill_config(), urdf_path='robot.urdf',
@@ -135,6 +155,11 @@ def test_teacher_loading_preserves_student_curriculum_and_play_flags(monkeypatch
         name: SimpleNamespace(enabled=enabled, start_fraction=.1, end_fraction=.35, full_strength=False)
         for name in names}), actions=SimpleNamespace(joint_pos=SimpleNamespace()),
         commands=SimpleNamespace(motion=SimpleNamespace(enable_rsi=enabled)))
+    cfg.dr.init_state = SimpleNamespace(enabled=enabled, **{
+        name: SimpleNamespace(**dict(component, enabled=True)) for name, component in init_components.items()})
+    # A destination's independently disabled component must stay disabled, too.
+    cfg.dr.init_state.root_vel.enabled = False
+    archived_before = copy.deepcopy(environment)
     runtime.student_apply_teacher_config(cfg, None)
     assert cfg.dr.push_force_max_n == (20., 20., 8.)
     assert cfg.dr.delay_nominal_steps == 0
@@ -142,9 +167,28 @@ def test_teacher_loading_preserves_student_curriculum_and_play_flags(monkeypatch
     assert cfg.commands.motion.enable_rsi == enabled
     for name in names:
         schedule = getattr(cfg.dr, name)
-        assert schedule.enabled == enabled
+        assert schedule.enabled == (enabled and (modern_archive or name in names[:-3]))
         assert (schedule.start_fraction, schedule.end_fraction) == (.1, .35)
         assert schedule.full_strength is False
+    assert environment == archived_before
+    if modern_archive:
+        assert cfg.dr.init_state.enabled is (enabled and teacher_init_enabled)
+        for name, source in init_components.items():
+            component = getattr(cfg.dr.init_state, name)
+            for key, value in source.items():
+                if key != 'enabled':
+                    assert getattr(component, key) == value
+            assert component.enabled is (name not in ('root_vel', 'dof_vel'))
+        for prefix in ('push', 'global_push', 'object_push', 'velocity_push'):
+            assert getattr(cfg.dr, f'{prefix}_interval_range_s') == (2., 6.)
+            assert getattr(cfg.dr, f'{prefix}_probability') == .7
+        assert cfg.dr.velocity_push_linear_max_m_s == .8
+        assert cfg.dr.velocity_push_angular_max_rad_s == .9
+    else:
+        assert cfg.dr.init_state is None
+    expected_legacy_noise = .05 if enabled and not modern_archive else 0.
+    assert cfg.commands.motion.reset_dof_pos_noise == expected_legacy_noise
+    assert cfg.commands.motion.reset_dof_vel_noise == expected_legacy_noise
 
 
 def test_resume_allows_new_curriculum_but_not_new_sensor_contract():

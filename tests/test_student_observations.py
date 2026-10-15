@@ -30,6 +30,7 @@ def make_sensor(nominal=1, maximum=3, count=2, history=5):
                      student_delay_bounds=student_delay_bounds, student_history=student_history,
                      student_observation_fields=student_observation_fields,
                      curriculum_strength=events.curriculum_strength,
+                     sample_delay_steps=events.sample_delay_steps,
                      quat_apply_inverse=lambda quat, vector: vector.clone())
     exec(compile(ast.Module(body=[node], type_ignores=[]), str(MDP / 'student_observations.py'), 'exec'), namespace)
     settings = SimpleNamespace(history_length=history, delay_nominal_steps=nominal,
@@ -105,6 +106,24 @@ def test_sensor_curriculum_starts_clean_at_nominal_delay_and_reaches_full_range(
     sensor.reset()
     assert sensor.delay_steps.min() == 0 and sensor.delay_steps.max() == 3
     assert sensor(env)[:, 1:31].abs().sum() > 0
+
+
+def test_sensor_delay_uses_gradual_distribution_and_only_resets_selected_rows():
+    sensor, env, _, _ = make_sensor(count=20000)
+    env.cfg.student_observation.full_strength = False
+    # At 10% of this schedule, smoothstep is 0.028: old floor bounds were nominal-only.
+    env.common_step_counter = 3
+    sensor.delay_steps[:] = 3
+    ids = torch.arange(0, env.num_envs, 2)
+    torch.manual_seed(7)
+    sensor.reset(ids)
+    assert sensor.delay_steps[1::2].eq(3).all()
+    sampled = sensor.delay_steps[ids]
+    assert 0 < (sampled != 1).float().mean() < .05
+    env.cfg.student_observation.randomize_delay = False
+    sensor.reset(ids)
+    assert sensor.delay_steps[ids].eq(1).all()
+    assert sensor.delay_steps[1::2].eq(3).all()
 
 
 def test_three_frame_builder_dimension():

@@ -31,6 +31,7 @@ from bb_mimic_nt.training import RSI_INITIAL_PROBABILITY
 
 from .contacts import contact_graph
 from .events import arm_push, training_policy_steps
+from .initialization import sample_initial_state, validate_initial_state_cfg
 
 STAGE_ACTIVE = 0
 STAGE_END_HOLD = 1
@@ -54,6 +55,7 @@ class MotionReferenceCommand(CommandTerm):
         )
         if cfg.end_duration_s is not None and (not math.isfinite(cfg.end_duration_s) or cfg.end_duration_s < 0):
             raise ValueError('end_duration_s must be finite and non-negative.')
+        validate_initial_state_cfg(getattr(getattr(env.cfg, "dr", None), "init_state", None))
         super().__init__(cfg, env)
 
         self.robot: Articulation = env.scene[cfg.robot_name]
@@ -298,37 +300,42 @@ class MotionReferenceCommand(CommandTerm):
             self.reference[name] = self.reference[name] * active.view(shape) * self.speed.view(shape)
 
     def _write_reference_state(self, env_ids: torch.Tensor) -> None:
+        init_cfg = getattr(getattr(self._env.cfg, "dr", None), "init_state", None)
+        initial = sample_initial_state(self.reference, env_ids, init_cfg)
+        # Missing/None marks old Teacher archives. An explicit disabled config
+        # is authoritative and must not restore their legacy joint noise.
+        if init_cfg is None:
+            initial["dof_pos"] += (
+                torch.rand_like(initial["dof_pos"]) * 2.0 - 1.0
+            ) * self.cfg.reset_dof_pos_noise
+            initial["dof_vel"] += (
+                torch.rand_like(initial["dof_vel"]) * 2.0 - 1.0
+            ) * self.cfg.reset_dof_vel_noise
         origin = self._env.scene.env_origins[env_ids]
         root_pose = torch.cat(
-            (self.reference["root_pos"][env_ids] + origin, self.reference["root_quat"][env_ids]), dim=-1
+            (initial["root_pos"] + origin, initial["root_quat"]), dim=-1
         )
         root_velocity = torch.cat(
-            (self.reference["root_lin_vel"][env_ids], self.reference["root_ang_vel"][env_ids]), dim=-1
+            (initial["root_lin_vel"], initial["root_ang_vel"]), dim=-1
         )
         self.robot.write_root_pose_to_sim(root_pose, env_ids=env_ids)
         self.robot.write_root_link_velocity_to_sim(root_velocity, env_ids=env_ids)
 
-        dof_noise = (torch.rand_like(self.reference["dof_pos"][env_ids]) * 2.0 - 1.0) * self.cfg.reset_dof_pos_noise
-        init_dof_pos = self.reference["dof_pos"][env_ids] + dof_noise
         limits = self.robot.data.joint_pos_limits[env_ids[:, None], self.joint_ids]
-        init_dof_pos = init_dof_pos.clamp(limits[..., 0], limits[..., 1])
-
-        init_dof_vel = self.reference["dof_vel"][env_ids] + (
-            torch.rand_like(self.reference["dof_vel"][env_ids]) * 2.0 - 1.0
-        ) * self.cfg.reset_dof_vel_noise
+        init_dof_pos = initial["dof_pos"].clamp(limits[..., 0], limits[..., 1])
 
         self.robot.write_joint_state_to_sim(
             init_dof_pos,
-            init_dof_vel,
+            initial["dof_vel"],
             joint_ids=self.joint_ids,
             env_ids=env_ids,
         )
 
         ball_pose = torch.cat(
-            (self.reference["object_pos"][env_ids] + origin, self.reference["object_quat"][env_ids]), dim=-1
+            (initial["object_pos"] + origin, initial["object_quat"]), dim=-1
         )
         ball_velocity = torch.cat(
-            (self.reference["object_lin_vel"][env_ids], self.reference["object_ang_vel"][env_ids]), dim=-1
+            (initial["object_lin_vel"], initial["object_ang_vel"]), dim=-1
         )
         self.ball.write_root_pose_to_sim(ball_pose, env_ids=env_ids)
         self.ball.write_root_velocity_to_sim(ball_velocity, env_ids=env_ids)
@@ -752,5 +759,5 @@ class MotionReferenceCommandCfg(CommandTermCfg):
     speed_update_interval_s: float = 0.10
     success_radius: float = 0.20
     resampling_time_range: tuple[float, float] = (1.0e9, 1.0e9)
-    reset_dof_pos_noise: float = 0.05
-    reset_dof_vel_noise: float = 0.05  # rad/s 初速度扰动
+    reset_dof_pos_noise: float = 0.0  # Legacy Teacher archives only; use dr.init_state for new configs.
+    reset_dof_vel_noise: float = 0.0

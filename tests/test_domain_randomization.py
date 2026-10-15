@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import math
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -61,6 +62,34 @@ def test_smoothstep_curriculum_and_switch() -> None:
     assert events.curriculum_strength(schedule, 60, 100) == 0.0
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+def test_curriculum_logging_accepts_new_and_legacy_randomization_settings(legacy) -> None:
+    path = MDP_ROOT / "curriculums.py"
+    node = next(node for node in ast.parse(path.read_text()).body
+                if isinstance(node, ast.FunctionDef) and node.name == "dr_curriculum")
+    namespace = dict(curriculum_strength=events.curriculum_strength,
+                     get_dr_context=lambda env: SimpleNamespace(iteration_offset=20))
+    exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), "exec"), namespace)
+    cfg = SimpleNamespace(total_iterations=100, steps_per_iteration=10)
+    for name in ("delay", "ball_mass", "pd_gains", "hand_friction", "foot_friction", "link_mass", "push", "global_push", "object_push"):
+        setattr(cfg, name, SimpleNamespace(enabled=True, start_fraction=.2, end_fraction=.6))
+    components = ("dof_pos", "dof_vel", "root_pos", "root_rot", "root_vel", "root_ang_vel", "object_pos")
+    if not legacy:
+        cfg.velocity_push = SimpleNamespace(enabled=True, full_strength=True)
+        cfg.init_state = SimpleNamespace(enabled=True, **{
+            name: SimpleNamespace(enabled=name != "root_rot") for name in components
+        })
+    env = SimpleNamespace(cfg=SimpleNamespace(dr=cfg), common_step_counter=200)
+    logged = namespace["dr_curriculum"](env, None)
+    assert logged["push"] == pytest.approx(.5)  # Includes the restored iteration offset.
+    assert logged["velocity_push"] == (0.0 if legacy else 1.0)
+    for name in components:
+        assert logged[f"init_state/{name}"] == float(not legacy and name != "root_rot")
+    if not legacy:
+        cfg.init_state.enabled = False
+        assert all(namespace["dr_curriculum"](env, None)[f"init_state/{name}"] == 0.0 for name in components)
+
+
 def test_delay_selector_uses_latest_final_target_and_per_env_levels() -> None:
     select = _delay_selector()
     history = torch.arange(5 * 2 * 3, dtype=torch.float32).reshape(5, 2, 3)
@@ -100,6 +129,7 @@ def test_reset_only_changes_selected_context_rows(monkeypatch, nominal, offset, 
         ball_mass_cache=object(),
         robot_mass_cache=object(),
         link_mass_ids=(),
+        velocity_push=None,
     )
     env.num_envs = 3
     env.step_dt = 0.01
@@ -114,8 +144,10 @@ def test_reset_only_changes_selected_context_rows(monkeypatch, nominal, offset, 
                                   link_weights={"torso_link": 1.}).items():
             setattr(cfg, f"{name}_{suffix}", value)
     context.pushes = {name: events.PushPulse(env, context, name) for name in events.PUSH_TYPES}
+    deadlines = torch.tensor([0.5, 10., 20.], dtype=torch.float64)
     for pulse in context.pushes.values():
         pulse.applied[:] = torch.tensor([True, True, False])
+        pulse.next_trigger_s[:] = deadlines
     monkeypatch.setattr(events, "get_dr_context", lambda env: context)
     monkeypatch.setattr(events, "_set_masses_and_inertias", lambda *args: None)
     monkeypatch.setattr(events, "_set_pd_gains", lambda *args: None)
@@ -139,15 +171,55 @@ def test_reset_only_changes_selected_context_rows(monkeypatch, nominal, offset, 
     assert context.pushes["push"].force[1].count_nonzero() == 0
     assert torch.equal(context.pushes["push"].applied, torch.tensor([False, True, False]))
     assert context.robot.has_external_wrench
-    radius = int(offset * strength)
-    assert sampled_bounds == [(max(0, nominal - radius), nominal + radius + 1)]
+    lower = max(0, nominal - offset)
+    low = nominal - math.ceil((nominal - lower) * strength)
+    high = nominal + math.ceil(offset * strength)
+    assert sampled_bounds == ([] if strength == 0 or offset == 0 else [(lower, nominal + offset + 1)])
     assert torch.all(
-        (context.delay_steps[[0, 2]] >= max(0, nominal - radius))
-        & (context.delay_steps[[0, 2]] <= nominal + radius)
+        (context.delay_steps[[0, 2]] >= low)
+        & (context.delay_steps[[0, 2]] <= high)
     )
     assert torch.all((context.ball_mass_scale[[0, 2]] >= 0.95) & (context.ball_mass_scale[[0, 2]] <= 1.05))
-    assert torch.all(context.pushes["push"].force[[0, 2]].abs() <= context.pushes["push"].force_max)
-    assert torch.all(context.pushes["push"].force[[0, 2]].abs() >= context.pushes["push"].force_min)
+    assert not context.pushes["push"].force[[0, 2]].any()
+    for pulse in context.pushes.values():
+        assert torch.equal(pulse.next_trigger_s, deadlines)
+
+
+@pytest.mark.parametrize("nominal, minimum, maximum", [(2, 0, 4), (1, 0, 3), (0, 0, 3), (0, 0, 0)])
+def test_delay_sampling_has_nominal_start_and_uniform_final_distribution(nominal, minimum, maximum):
+    assert events.sample_delay_steps(100, nominal, minimum, maximum, 0., "cpu").eq(nominal).all()
+    torch.manual_seed(12)
+    sample = events.sample_delay_steps(100000, nominal, minimum, maximum, 1., "cpu")
+    frequency = torch.bincount(sample, minlength=maximum + 1).float() / len(sample)
+    expected = 1 / (maximum - minimum + 1)
+    assert (frequency[minimum:] - expected).abs().max() < .01
+
+
+@pytest.mark.parametrize("threshold", [.5, 1.])
+def test_delay_probabilities_are_continuous_across_old_integer_radius_thresholds(threshold):
+    # Coupling the random draws isolates the distribution change from Monte Carlo noise.
+    torch.manual_seed(15)
+    left = events.sample_delay_steps(100000, 2, 0, 4, threshold - .001, "cpu")
+    torch.manual_seed(15)
+    right = events.sample_delay_steps(100000, 2, 0, 4, min(1., threshold + .001), "cpu")
+    assert (left != right).float().mean() < .005
+
+
+def test_delay_grows_from_first_fraction_and_preserves_asymmetric_expected_value():
+    torch.manual_seed(18)
+    early = events.sample_delay_steps(100000, 1, 0, 3, .01, "cpu")
+    assert 0 < (early != 1).float().mean() < .03
+    sample = events.sample_delay_steps(100000, 1, 0, 3, .3, "cpu")
+    # Full-range mean 1.5 contracts toward nominal 1, without biased rounding.
+    assert sample.float().mean() == pytest.approx(1.15, abs=.01)
+    assert sample.min() >= 0 and sample.max() <= 3
+
+
+@pytest.mark.parametrize("args", [(1, -1, 3, .5), (2, 0, 1, .5), (1.5, 0, 3, .5),
+                                  (1, 0, 3, -1.), (1, 0, 3, float('nan'))])
+def test_delay_sampler_rejects_invalid_configuration(args):
+    with pytest.raises(ValueError, match="Delay"):
+        events.sample_delay_steps(2, *args, "cpu")
 
 
 def test_push_force_range_is_scaled_by_curriculum_strength() -> None:

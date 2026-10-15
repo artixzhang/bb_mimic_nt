@@ -9,7 +9,7 @@ from isaaclab.utils.math import quat_apply_inverse
 
 from bb_mimic_nt.student import student_delay_bounds, student_history, student_observation_fields
 
-from .events import curriculum_strength
+from .events import curriculum_strength, sample_delay_steps
 
 
 class StudentObservation(ManagerTermBase):
@@ -77,9 +77,10 @@ class StudentObservation(ManagerTermBase):
         if settings.randomize_delay:
             low, high = student_delay_bounds(
                 settings.delay_nominal_steps, settings.delay_min_steps, settings.delay_max_steps,
-                self.curriculum_strength,
             )
-            self.delay_steps[env_ids] = torch.randint(low, high + 1, (len(env_ids),), device=self.device)
+            self.delay_steps[env_ids] = sample_delay_steps(
+                len(env_ids), settings.delay_nominal_steps, low, high, self.curriculum_strength, self.device
+            )
         else:
             self.delay_steps[env_ids] = settings.delay_nominal_steps
 

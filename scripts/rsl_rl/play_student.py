@@ -24,10 +24,10 @@ parser.add_argument(
     "--all-clips", action="store_true",
     help="Play every clip of the selected skill, or every clip of all skills when --skill is omitted.",
 )
-parser.add_argument("--random-init", action="store_true", help="Enable reset joint position/velocity noise.")
+parser.add_argument("--random-init", action="store_true", help="Enable HumanX joint, root, and ball initial-state noise.")
 parser.add_argument(
     "--domain-randomization", action="store_true",
-    help="Enable full-strength physical randomization and pushes.",
+    help="Enable full-strength physical randomization, force pushes, and velocity pushes.",
 )
 parser.add_argument("--real-time", action="store_true")
 parser.add_argument("--ignore-failures", action="store_true")

@@ -70,16 +70,53 @@ class DRPushScheduleCfg:
     full_strength: bool = False
 
 @configclass
+class DRPushVelocityScheduleCfg:
+    enabled: bool = True
+    start_fraction: float = 0.0
+    end_fraction: float = 0.5
+    full_strength: bool = False
+
+@configclass
 class DRDisabledCfg:
     enabled: bool = False
+
+
+@configclass
+class DRGaussianNoiseCfg:
+    enabled: bool = True
+    std: float = 0.0
+
+
+@configclass
+class DRRotationNoiseCfg:
+    enabled: bool = True
+    max_angle_deg: float = 10.0
+
+
+@configclass
+class DRObjectPositionNoiseCfg:
+    enabled: bool = True
+    half_range_m: float = 0.1
+
+
+@configclass
+class DRInitialStateCfg:
+    enabled: bool = True
+    dof_pos: DRGaussianNoiseCfg = DRGaussianNoiseCfg(std=0.1)
+    dof_vel: DRGaussianNoiseCfg = DRGaussianNoiseCfg(std=0.01)
+    root_pos: DRGaussianNoiseCfg = DRGaussianNoiseCfg(std=0.02)
+    root_rot: DRRotationNoiseCfg = DRRotationNoiseCfg()
+    root_vel: DRGaussianNoiseCfg = DRGaussianNoiseCfg(std=0.05)
+    root_ang_vel: DRGaussianNoiseCfg = DRGaussianNoiseCfg(std=0.02)
+    object_pos: DRObjectPositionNoiseCfg = DRObjectPositionNoiseCfg()
 
 
 @configclass
 class DomainRandomizationCfg:
     total_iterations: int = PPO_MAX_ITERATIONS
     steps_per_iteration: int = PPO_STEPS_PER_ENV
-    # Policy steps: fixed nominal at play; train uniformly over
-    # max(0, nominal - radius)..nominal + radius as the curriculum expands.
+    # Policy steps: smoothly scale full-range integer samples about nominal,
+    # then stochastically round. Full strength is uniform over the final range.
     delay_nominal_steps: int = 0
     delay_max_offset_steps: int = 2
     ball_mass_fraction: float = 0.05
@@ -90,25 +127,38 @@ class DomainRandomizationCfg:
     foot_friction_delta: float = 0.3
     link_mass_fraction: float = 0.10
 
-    push_force_min_n: tuple[float, float, float] = (30.0, 30.0, 20.0)
+    # All four Push intervals use independent continuous uniform sampling.
+    # Timers span episode resets; reset clears active pulses, not deadlines.
+    push_force_min_n: tuple[float, float, float] = (0.0, 0.0, 0.0)
     push_force_max_n: tuple[float, float, float] = (70.0, 70.0, 50.0)
-    push_torque_max_nm: float = 10.0
+    push_torque_max_nm: float = 5.0
     push_duration_s: float = 0.1
     push_probability: float = 0.8
+    push_interval_range_s: tuple[float, float] = (1.0, 5.0)
     push_link_weights: dict[str, float] = {"torso_link": 0.5, "pelvis": 0.5}
 
-    global_push_force_min_n: tuple[float, float, float] = (3.0, 3.0, 3.0)
+    global_push_force_min_n: tuple[float, float, float] = (0.0, 0.0, 0.0)
     global_push_force_max_n: tuple[float, float, float] = (10.0, 10.0, 10.0)
     global_push_torque_max_nm: float = 2.0
     global_push_duration_s: float = 0.3
     global_push_probability: float = 0.8
+    global_push_interval_range_s: tuple[float, float] = (1.0, 5.0)
     global_push_link_weights: dict[str, float] = {"torso_link": 0.5, "pelvis": 0.5}
 
-    object_push_force_min_n: tuple[float, float, float] = (3.0, 3.0, 3.0)
-    object_push_force_max_n: tuple[float, float, float] = (10.0, 10.0, 10.0)
+    object_push_force_min_n: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    object_push_force_max_n: tuple[float, float, float] = (3.0, 3.0, 3.0)
     object_push_torque_max_nm: float = 0.0
-    object_push_duration_s: float = 0.5
+    object_push_duration_s: float = 0.1
     object_push_probability: float = 0.6
+    object_push_interval_range_s: tuple[float, float] = (1.0, 5.0)
+
+    # Additive root-link velocity impulses in world coordinates, independent of forces.
+    velocity_push_interval_range_s: tuple[float, float] = (1.0, 5.0)
+    velocity_push_probability: float = 1.0
+    velocity_push_linear_max_m_s: float = 0.5
+    velocity_push_angular_max_rad_s: float = 0.52
+
+    init_state: DRInitialStateCfg | None = DRInitialStateCfg()
 
     delay: DRLatencyScheduleCfg = DRLatencyScheduleCfg()
     ball_mass: DRPhysicsScheduleCfg = DRPhysicsScheduleCfg()
@@ -119,6 +169,7 @@ class DomainRandomizationCfg:
     push: DRPushScheduleCfg = DRPushScheduleCfg()
     global_push: DRPushScheduleCfg = DRPushScheduleCfg()
     object_push: DRPushScheduleCfg = DRPushScheduleCfg()
+    velocity_push: DRPushVelocityScheduleCfg = DRPushVelocityScheduleCfg()
 
     # delay: DRScheduleCfg = DRDisabledCfg()
     # ball_mass: DRScheduleCfg = DRDisabledCfg()
@@ -333,5 +384,7 @@ class G1ShootPlayEnvCfg(G1ShootEnvCfg):
         self.commands.motion.enable_adaptive_speed = False
         self.commands.motion.reset_dof_pos_noise = 0.0
         self.commands.motion.reset_dof_vel_noise = 0.0
-        for name in ("delay", "ball_mass", "pd_gains", "hand_friction", "foot_friction", "link_mass", "push", "global_push", "object_push"):
+        if self.dr.init_state is not None:
+            self.dr.init_state.enabled = False
+        for name in ("delay", "ball_mass", "pd_gains", "hand_friction", "foot_friction", "link_mass", "push", "global_push", "object_push", "velocity_push"):
             getattr(self.dr, name).enabled = False

@@ -32,15 +32,19 @@ STUDENT_OBSERVATION_DIM = sum(size for _, size in STUDENT_OBSERVATION_FIELDS)
 
 
 def student_delay_bounds(nominal: int, minimum: int, maximum: int, strength: float = 1.0) -> tuple[int, int]:
-    """Expand an integer sampling interval around nominal without negative delays."""
+    """Return reachable support bounds after interpolation and stochastic rounding.
+
+    These bounds describe support only; sampling uniformly between them would
+    reintroduce abrupt curriculum transitions. Sample from the full final range.
+    """
     if any(not isinstance(value, int) for value in (nominal, minimum, maximum)):
         raise ValueError("Student observation delay steps must be integers.")
     if not 0 <= minimum <= nominal <= maximum:
         raise ValueError("Student observation delay must satisfy 0 <= minimum <= nominal <= maximum.")
     if not math.isfinite(strength) or not 0.0 <= strength <= 1.0:
         raise ValueError("Student observation curriculum strength must be in [0, 1].")
-    low = nominal - math.floor((nominal - minimum) * strength + 1.0e-6)
-    high = nominal + math.floor((maximum - nominal) * strength + 1.0e-6)
+    low = nominal - math.ceil((nominal - minimum) * strength)
+    high = nominal + math.ceil((maximum - nominal) * strength)
     return low, high
 
 

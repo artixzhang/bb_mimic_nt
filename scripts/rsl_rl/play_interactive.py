@@ -124,7 +124,11 @@ def main(env_cfg, agent_cfg):
         selected_clip_count if args_cli.all_clips else max(1, args_cli.num_envs)
     )
     env_cfg.commands.motion.enable_rsi = False
-    for name in ("push", "global_push", "object_push"):
+    env_cfg.commands.motion.reset_dof_pos_noise = 0.0
+    env_cfg.commands.motion.reset_dof_vel_noise = 0.0
+    if env_cfg.dr.init_state is not None:
+        env_cfg.dr.init_state.enabled = False
+    for name in ("push", "global_push", "object_push", "velocity_push"):
         getattr(env_cfg.dr, name).enabled = False
     env_cfg.observations.policy.enable_corruption = False
     env_cfg.sim.device = (

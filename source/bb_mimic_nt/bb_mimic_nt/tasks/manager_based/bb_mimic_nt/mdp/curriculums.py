@@ -47,7 +47,13 @@ def rsi_schedule(env, command_name: str = "motion") -> dict[str, float]:
 def dr_curriculum(env, env_ids) -> dict[str, float]:
     cfg = env.cfg.dr
     iteration = get_dr_context(env).iteration_offset + env.common_step_counter / cfg.steps_per_iteration
-    return {
-        name: curriculum_strength(getattr(cfg, name), iteration, cfg.total_iterations)
-        for name in ("delay", "ball_mass", "pd_gains", "hand_friction", "foot_friction", "link_mass", "push", "global_push", "object_push")
-    }
+    strengths = {}
+    for name in ("delay", "ball_mass", "pd_gains", "hand_friction", "foot_friction", "link_mass", "push", "global_push", "object_push", "velocity_push"):
+        schedule = getattr(cfg, name, None)
+        strengths[name] = 0.0 if schedule is None else curriculum_strength(schedule, iteration, cfg.total_iterations)
+    initial = getattr(cfg, "init_state", None)
+    for name in ("dof_pos", "dof_vel", "root_pos", "root_rot", "root_vel", "root_ang_vel", "object_pos"):
+        strengths[f"init_state/{name}"] = float(
+            initial is not None and initial.enabled and getattr(initial, name).enabled
+        )
+    return strengths
