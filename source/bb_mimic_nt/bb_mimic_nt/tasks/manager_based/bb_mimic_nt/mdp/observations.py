@@ -43,7 +43,7 @@ def root_ang_vel_b(env) -> torch.Tensor:
 
 def dof_pos(env) -> torch.Tensor:
     term = motion_command(env)
-    return term.robot.data.joint_pos[:, term.joint_ids]
+    return term.robot.data.joint_pos[:, term.joint_ids] - env.action_manager.get_term("joint_pos").nominal
 
 
 def dof_vel(env) -> torch.Tensor:
@@ -75,13 +75,13 @@ def hoop_pos_cyl(env) -> torch.Tensor:
 
 
 def previous_action(env) -> torch.Tensor:
-    # Expose the bounded residual used to form the PD target.
-    return env.action_manager.get_term("joint_pos").raw_actions
+    """Most recent dimensionless request, after clipping and before action delay."""
+    return env.action_manager.get_term("joint_pos").requested_actions
 
 
 def pd_error(env) -> torch.Tensor:
     term = motion_command(env)
-    target = env.action_manager.get_term("joint_pos").desired_actions
+    target = env.action_manager.get_term("joint_pos").requested_targets
     return target - term.robot.data.joint_pos[:, term.joint_ids]
 
 
@@ -114,7 +114,7 @@ def delta_object_pos_w(env) -> torch.Tensor:
 
 
 def reference_dof_pos(env) -> torch.Tensor:
-    return motion_command(env).reference["dof_pos"]
+    return motion_command(env).reference["dof_pos"] - env.action_manager.get_term("joint_pos").nominal
 
 
 def reference_root_lin_vel_b(env) -> torch.Tensor:

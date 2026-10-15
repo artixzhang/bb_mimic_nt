@@ -15,7 +15,7 @@ class G1ShootStudentDAggerCfg(RslRlDistillationRunnerCfg):
     num_steps_per_env: int = DAGGER_STEPS_PER_ENV
     max_iterations: int = 1000
     save_interval: int = 50
-    experiment_name: str = "g1_shoot_student_dagger_v3"
+    experiment_name: str = "g1_shoot_student_dagger_v4"
     obs_groups: dict[str, list[str]] = {"policy": ["policy"], "teacher": ["teacher"]}
     clip_actions: float | None = None
     policy: RslRlDistillationStudentTeacherCfg = RslRlDistillationStudentTeacherCfg(

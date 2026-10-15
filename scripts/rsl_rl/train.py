@@ -98,6 +98,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import bb_mimic_nt.tasks  # noqa: F401
 from bb_mimic_nt.training import configure_training_curricula
+from bb_mimic_nt.policy_contract import load_teacher_contract, save_policy_contract
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -202,6 +203,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         # load previously trained model
+        load_teacher_contract(resume_path, base_env)
         runner.load(resume_path)
         if hasattr(base_env.cfg, "dr"):
             completed = runner.current_learning_iteration
@@ -215,6 +217,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
+    save_policy_contract(base_env, os.path.join(log_dir, "params"))
 
     # run training
     runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)

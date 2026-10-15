@@ -22,6 +22,10 @@ from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
 
 from bb_mimic_nt.training import TEACHER_HISTORY_LENGTH
+from bb_mimic_nt.action_math import (
+    ACTION_OBSERVATION_SCALE, ANGULAR_VELOCITY_OBSERVATION_SCALE,
+    JOINT_POSITION_OBSERVATION_SCALE, JOINT_VELOCITY_OBSERVATION_SCALE, LINEAR_VELOCITY_OBSERVATION_SCALE,
+)
 from bb_mimic_nt.skills import DEFAULT_SKILLS_PATH
 
 from bb_mimic_nt.objects import (
@@ -174,10 +178,9 @@ class CommandsCfg:
 
 @configclass
 class ActionsCfg:
-    joint_pos = mdp.ReferenceResidualJointPositionActionCfg(
+    joint_pos = mdp.DirectJointPositionActionCfg(
         asset_name="robot",
         joint_names=list(G1Constants.G1_ACTUATED_JOINT_NAMES),
-        command_name="motion",
     )
 
 
@@ -191,15 +194,15 @@ class ObservationsCfg:
         gravity = ObsTerm(func=mdp.gravity_vec_b)
         root_height = ObsTerm(func=mdp.root_pos_z_w)
         root_quaternion = ObsTerm(func=mdp.root_quat_w)
-        root_linear_velocity = ObsTerm(func=mdp.root_lin_vel_b)
-        root_angular_velocity = ObsTerm(func=mdp.root_ang_vel_b)
-        joint_position = ObsTerm(func=mdp.dof_pos)
-        joint_velocity = ObsTerm(func=mdp.dof_vel)
+        root_linear_velocity = ObsTerm(func=mdp.root_lin_vel_b, scale=LINEAR_VELOCITY_OBSERVATION_SCALE)
+        root_angular_velocity = ObsTerm(func=mdp.root_ang_vel_b, scale=ANGULAR_VELOCITY_OBSERVATION_SCALE)
+        joint_position = ObsTerm(func=mdp.dof_pos, scale=JOINT_POSITION_OBSERVATION_SCALE)
+        joint_velocity = ObsTerm(func=mdp.dof_vel, scale=JOINT_VELOCITY_OBSERVATION_SCALE)
         tracked_link_position = ObsTerm(func=mdp.link_pos_b)
         ball_position = ObsTerm(func=mdp.object_pos_b)
         ball_linear_velocity = ObsTerm(func=mdp.object_lin_vel_b)
         hoop_position = ObsTerm(func=mdp.hoop_pos_cyl)
-        previous_action = ObsTerm(func=mdp.previous_action)
+        previous_action = ObsTerm(func=mdp.previous_action, scale=ACTION_OBSERVATION_SCALE)
         pd_error = ObsTerm(func=mdp.pd_error)
 
         # Reference deltas, pose targets, velocities, contacts, and release: 186.
@@ -208,7 +211,7 @@ class ObservationsCfg:
         joint_position_error = ObsTerm(func=mdp.delta_dof_pos)
         tracked_link_position_error = ObsTerm(func=mdp.delta_link_pos_b)
         ball_position_error = ObsTerm(func=mdp.delta_object_pos_w)
-        reference_joint_position = ObsTerm(func=mdp.reference_dof_pos)
+        reference_joint_position = ObsTerm(func=mdp.reference_dof_pos, scale=JOINT_POSITION_OBSERVATION_SCALE)
         reference_tracked_link_position = ObsTerm(func=mdp.reference_link_pos_b)
         reference_ball_position = ObsTerm(func=mdp.reference_object_pos_w)
         reference_root_linear_velocity = ObsTerm(func=mdp.reference_root_lin_vel_b)
@@ -219,8 +222,12 @@ class ObservationsCfg:
         reference_release = ObsTerm(func=mdp.reference_release)
 
         gravity_history = ObsTerm(func=mdp.gravity_vec_b, history_length=TEACHER_HISTORY_LENGTH)
-        joint_position_history = ObsTerm(func=mdp.dof_pos, history_length=TEACHER_HISTORY_LENGTH)
-        action_history = ObsTerm(func=mdp.previous_action, history_length=TEACHER_HISTORY_LENGTH)
+        joint_position_history = ObsTerm(
+            func=mdp.dof_pos, scale=JOINT_POSITION_OBSERVATION_SCALE, history_length=TEACHER_HISTORY_LENGTH
+        )
+        previous_action_history = ObsTerm(
+            func=mdp.previous_action, scale=ACTION_OBSERVATION_SCALE, history_length=TEACHER_HISTORY_LENGTH
+        )
         skill_command = ObsTerm(func=mdp.skill_command)
         reference_speed = ObsTerm(func=mdp.reference_speed)
         domain_randomization = ObsTerm(func=mdp.dr_privileged_observation)
@@ -320,6 +327,7 @@ class G1ShootPlayEnvCfg(G1ShootEnvCfg):
         super().__post_init__()
         self.scene.num_envs = 1
         self.observations.policy.enable_corruption = False
+        self.rewards.unified_mimic.params["settings"].regularization.full_strength = True
         self.commands.motion.enable_rsi = False
         self.commands.motion.randomize_clip = False
         self.commands.motion.enable_adaptive_speed = False

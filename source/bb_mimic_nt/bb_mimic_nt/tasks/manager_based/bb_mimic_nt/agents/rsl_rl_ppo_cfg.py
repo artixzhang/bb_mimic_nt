@@ -11,12 +11,12 @@ class G1ShootPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = PPO_STEPS_PER_ENV
     max_iterations = PPO_MAX_ITERATIONS
     save_interval = 100
-    experiment_name = "g1_shoot_teacher_v3"
+    experiment_name = "g1_shoot_teacher_v4"
     seed = 42
     empirical_normalization = False
     clip_actions = None
     policy = RslRlPpoActorCriticCfg(
-        init_noise_std=0.25,
+        init_noise_std=0.8,
         actor_obs_normalization=True,
         critic_obs_normalization=True,
         actor_hidden_dims=[1024, 512, 256],
@@ -27,7 +27,7 @@ class G1ShootPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.001,
+        entropy_coef=0.01,
         num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=3.0e-4,

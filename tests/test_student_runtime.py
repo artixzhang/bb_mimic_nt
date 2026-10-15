@@ -7,6 +7,7 @@ import torch
 
 pytest.importorskip('rsl_rl')
 from bb_mimic_nt.student import student_observation_fields
+from student_fixtures import direct_student_metadata
 from bb_mimic_nt.student_runtime import (
     StudentPolicy, student_apply_deployment_config,
     student_export, student_load_policy, student_policy_from_state,
@@ -16,30 +17,7 @@ from bb_mimic_nt.student_runtime import (
 @pytest.mark.parametrize('history', [3, 5])
 @pytest.mark.parametrize('stale_source', [False, True])
 def test_student_deployment_and_torchscript_roundtrip(tmp_path, history, stale_source, monkeypatch):
-    metadata = dict(command_dimension=3, format='bb_mimic_nt_student_training_v3', observation_dim=93 * history + 6,
-                    action_dim=29, student_hidden_dims=[16, 8], activation='elu',
-                    observation_fields=[dict(name=name, size=size) for name, size in student_observation_fields(history)])
-    metadata['history_length'] = history
-    metadata.update(joint_names=[f'joint_{i}' for i in range(29)],
-                    nominal_joint_position=[0.] * 29, safe_lower_joint_position=[-2.] * 29,
-                    safe_upper_joint_position=[2.] * 29, pd_stiffness=[100.] * 29, pd_damping=[3.] * 29,
-                    policy_hz=100., history_order='oldest_to_newest',
-                    action_semantics='joint_position_radians_minus_nominal_pose',
-                    default_action_delay_steps=0, default_observation_delay_steps=1,
-                    observation_settings=dict(scales=dict(gravity=1., angular_velocity=.25,
-                        joint_position=1., joint_velocity=.05, applied_action=1., hoop_position=.25, hoop_theta=2.)))
-    from bb_mimic_nt.student_deployment import build_deployment_contract
-    batch = dict(metadata=dict(dof_names=metadata['joint_names'], fps=100.), lengths=torch.tensor([1, 166, 100]),
-                 dof_pos=torch.zeros(3, 166, 29), root_pos=torch.zeros(3, 166, 3),
-                 root_quat=torch.tensor([1., 0., 0., 0.]).repeat(3, 166, 1),
-                 object_pos=torch.zeros(3, 166, 3), release=torch.zeros(3, 166),
-                 hoop_pos_cyl=torch.tensor([4., -.7, 3.05]).repeat(3, 166, 1))
-    metadata['history_length'] = history
-    from bb_mimic_nt.skills import load_skill_config
-    batch['metadata'].update(skill_config=load_skill_config(), skill_clip_counts=[1, 1, 1],
-                             skill_sources=[dict(source_sha256=f'motion-{i}') for i in range(3)],
-                             urdf_sha256='urdf-hash')
-    metadata['deployment_contract'] = build_deployment_contract(batch)
+    metadata = direct_student_metadata(history=history, nominal=0.)
     metadata['teacher_sha256'] = 'archived-teacher-hash'
     metadata['export_source'] = dict(checkpoint='model_42.pt', iteration=42)
     policy = StudentPolicy([16, 8], 'elu', metadata['observation_dim']).eval()
@@ -73,7 +51,8 @@ def test_student_deployment_and_torchscript_roundtrip(tmp_path, history, stale_s
         sha256=hashlib.sha256(source.read_bytes()).hexdigest(), iteration=42)
     assert manifest['provenance']['export_source'] == deployment['export_source']
     assert not (tmp_path / 'deployment_config.json').exists()
-    assert 'format' not in deployment and 'schema' not in manifest
+    assert deployment['format'] == 'bb_mimic_nt_student_deployment_v4'
+    assert deployment['model']['output']['name'] == 'joint_action'
     assert deployment['default_skill'] == 'hold'
     assert deployment['initial_pose'] == [0.] * 29
     assert 'motion_profiles' not in deployment['skills']
@@ -88,7 +67,8 @@ def test_student_deployment_and_torchscript_roundtrip(tmp_path, history, stale_s
     assert cfg.student_observation.scales.hoop_position == .25
     assert cfg.student_observation.scales.hoop_theta == 2.
     assert cfg.student_observation.delay_min_steps == cfg.student_observation.delay_max_steps == 0
-    assert cfg.actions.joint_pos.safe_lower_joint_position == [-2.] * 29
+    assert cfg.actions.joint_pos.action_scale_values == metadata['action_scale']
+    assert cfg.actions.joint_pos.action_clip == 100.
     assert [skill['command_id'] for skill in cfg.commands.motion.skills_config['skills']] == [0, 1, 2]
     assert [skill['end'] for skill in cfg.commands.motion.skills_config['skills']] == [
         skill['end'] for skill in saved['skills']['definitions']]
@@ -116,12 +96,11 @@ def test_student_deployment_and_torchscript_roundtrip(tmp_path, history, stale_s
 
 
 def test_training_metadata_deploys_without_artificial_delay():
-    metadata = dict(command_dimension=3, history_length=3, observation_dim=285, default_action_delay_steps=2, action_adapter={},
-                    observation_settings=dict(delay_nominal_steps=2, delay_max_offset_steps=2,
-                                              gravity_noise_std=.015, angular_velocity_noise_std=.05,
-                                              joint_position_noise_std=.01, joint_velocity_noise_std=.1, scales={}))
+    metadata = direct_student_metadata(history=3)
+    metadata['default_action_delay_steps'] = 2
     cfg = SimpleNamespace(student_observation=SimpleNamespace(scales=SimpleNamespace()),
-                          dr=SimpleNamespace(), actions=SimpleNamespace(joint_pos=SimpleNamespace()))
+                          dr=SimpleNamespace(), actions=SimpleNamespace(joint_pos=SimpleNamespace()),
+                          commands=SimpleNamespace(motion=SimpleNamespace()))
     student_apply_deployment_config(cfg, metadata)
     assert cfg.student_observation.history_length == 3
     assert (cfg.student_observation.delay_min_steps, cfg.student_observation.delay_max_steps) == (0, 0)
@@ -143,14 +122,15 @@ def test_teacher_loading_preserves_student_curriculum_and_play_flags(monkeypatch
                   push_force_min_n=(8., 8., 3.), push_force_max_n=(20., 20., 8.))
     archived = dict(ranges)
     archived.update({name: dict(enabled=True, start_fraction=.15, end_fraction=.8) for name in names})
-    action = dict(residual_scale_fraction=.2, minimum_residual_scale=.05,
-                  maximum_residual_scale=.5, position_limit_margin=.01)
+    action = dict(action_scale_factor=.25, action_clip=100.)
     from bb_mimic_nt.skills import load_skill_config
     motion = dict(skills_path='skills.yaml', skills_config=load_skill_config(), urdf_path='robot.urdf',
                   reset_dof_pos_noise=.05,
                   reset_dof_vel_noise=.05, default_clip_id=0)
     environment = dict(dr=archived, actions=dict(joint_pos=action), commands=dict(motion=motion))
     monkeypatch.setattr(runtime, 'student_teacher_configs', lambda checkpoint: ({}, environment))
+    contract = direct_student_metadata()['policy_contract']
+    monkeypatch.setattr(runtime, 'load_teacher_contract', lambda checkpoint: contract)
     cfg = SimpleNamespace(dr=SimpleNamespace(**{
         name: SimpleNamespace(enabled=enabled, start_fraction=.1, end_fraction=.35, full_strength=False)
         for name in names}), actions=SimpleNamespace(joint_pos=SimpleNamespace()),
@@ -169,13 +149,35 @@ def test_teacher_loading_preserves_student_curriculum_and_play_flags(monkeypatch
 
 def test_resume_allows_new_curriculum_but_not_new_sensor_contract():
     from bb_mimic_nt.student_runtime import student_validate_resume_observation
-    previous = dict(observation_dim=471, training_observation_settings=dict(
-        history_length=5, delay_nominal_steps=1, delay_min_steps=0, delay_max_steps=3,
-        start_fraction=0., end_fraction=.3, noise_strength=1.))
+    previous = direct_student_metadata()
     current = dict(previous, training_observation_settings=dict(previous['training_observation_settings'], end_fraction=.2))
     student_validate_resume_observation(previous, current)
     current['training_observation_settings']['delay_nominal_steps'] = 0
     with pytest.raises(ValueError, match='noise/history/delay'):
         student_validate_resume_observation(previous, current)
-    with pytest.raises(ValueError, match='history dimension'):
+    with pytest.raises(ValueError, match='dimensions'):
         student_validate_resume_observation(dict(previous, observation_dim=283), previous)
+
+
+@pytest.mark.parametrize('legacy_format', [None, 'bb_mimic_nt_student_training_v3'])
+def test_old_checkpoint_is_rejected_before_loading_student_weights(tmp_path, legacy_format):
+    from bb_mimic_nt.student_runtime import student_read_artifact
+    metadata = direct_student_metadata()
+    metadata['format'] = legacy_format
+    checkpoint = tmp_path / 'model_1.pt'
+    torch.save(dict(format='bb_mimic_nt_student_dagger_v1', student={}, metadata=metadata), checkpoint)
+    with pytest.raises(ValueError, match='Legacy Student'):
+        student_read_artifact(checkpoint)
+    with pytest.raises(ValueError, match='Legacy Student'):
+        student_policy_from_state({}, metadata, 'cpu')
+
+
+def test_resume_rejects_same_size_action_coordinate_change():
+    import copy
+    from bb_mimic_nt.student_runtime import student_validate_resume_observation
+    previous = direct_student_metadata()
+    current = copy.deepcopy(previous)
+    current['action_scale'][0] *= 2
+    current['policy_contract']['action_scale'][0] *= 2
+    with pytest.raises(ValueError, match='action_scale'):
+        student_validate_resume_observation(previous, current)

@@ -7,6 +7,7 @@ every mathematical sub-reward independently testable.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 
 import torch
@@ -16,8 +17,6 @@ from isaaclab.utils import configclass
 from isaaclab.utils.math import quat_error_magnitude, quat_inv, quat_mul
 
 from bb_mimic_nt.core import (
-    action_accel_cost,
-    clipped_regularization,
     gated_height_shortfall_cost,
     gated_top_level_reward,
     gaussian,
@@ -192,6 +191,73 @@ def object_reward_sigmas(settings, env) -> tuple[tuple[float, ...], float]:
 
 
 @configclass
+class ControlRegularizationCfg:
+    """HumanX control costs, adapted to this task's unit-scale tracking reward.
+
+    ``normalization`` is the selected HumanX positive reward weight sum, not
+    a joint count or a time-step multiplier. Disabling the curriculum selects
+    its final parameters; ``full_strength`` does the same for evaluation.
+    """
+
+    action_rate_weight: float = 0.5
+    torque_weight: float = 1.0e-5
+    position_limit_weight: float = 10.0
+    velocity_limit_weight: float = 5.0
+    torque_limit_weight: float = 5.0
+    normalization: float = 16.05
+
+    enabled: bool = True
+    start_fraction: float = 0.10
+    end_fraction: float = 0.60
+    full_strength: bool = False
+    initial_strength: float = 0.10
+    final_strength: float = 1.0
+    soft_position_limit_initial: float = 0.95
+    soft_position_limit_final: float = 0.90
+    soft_velocity_limit_initial: float = 0.96
+    soft_velocity_limit_final: float = 0.95
+    soft_torque_limit_initial: float = 0.95
+    soft_torque_limit_final: float = 0.85
+
+    def __post_init__(self) -> None:
+        weights = (
+            self.action_rate_weight, self.torque_weight, self.position_limit_weight,
+            self.velocity_limit_weight, self.torque_limit_weight,
+        )
+        if any(not math.isfinite(value) or value < 0.0 for value in weights):
+            raise ValueError("Control regularization weights must be finite and non-negative.")
+        if not math.isfinite(self.normalization) or self.normalization <= 0.0:
+            raise ValueError("Control regularization normalization must be positive and finite.")
+        if not 0.0 <= self.start_fraction < self.end_fraction <= 1.0:
+            raise ValueError("Control regularization schedule must satisfy 0 <= start < end <= 1.")
+        if not 0.0 <= self.initial_strength <= self.final_strength <= 1.0:
+            raise ValueError("Control regularization strengths must satisfy 0 <= initial <= final <= 1.")
+        for initial, final in (
+            (self.soft_position_limit_initial, self.soft_position_limit_final),
+            (self.soft_velocity_limit_initial, self.soft_velocity_limit_final),
+            (self.soft_torque_limit_initial, self.soft_torque_limit_final),
+        ):
+            if not 0.0 < final <= initial <= 1.0:
+                raise ValueError("Control soft limits must satisfy 0 < final <= initial <= 1.")
+
+
+def control_regularization_parameters(settings: ControlRegularizationCfg, env) -> tuple[float, ...]:
+    """Return progress, penalty strength, and the three active soft-limit factors."""
+    if not settings.enabled or settings.full_strength:
+        progress = 1.0
+    else:
+        iteration = training_policy_steps(env) / env.cfg.dr.steps_per_iteration
+        progress = curriculum_strength(settings, iteration, env.cfg.dr.total_iterations)
+    pairs = (
+        (settings.initial_strength, settings.final_strength),
+        (settings.soft_position_limit_initial, settings.soft_position_limit_final),
+        (settings.soft_velocity_limit_initial, settings.soft_velocity_limit_final),
+        (settings.soft_torque_limit_initial, settings.soft_torque_limit_final),
+    )
+    return (progress, *(initial + progress * (final - initial) for initial, final in pairs))
+
+
+@configclass
 class UnifiedRewardCfg:
     # body, obj, relative, contact
     # original (0.45, 0.20, 0.20, 0.15)
@@ -244,66 +310,57 @@ class UnifiedRewardCfg:
     root_airborne_height_tolerance: float = 0.0
     root_airborne_height_weight: float = 2.0
     
-    action_magnitude_weight: float = 0.03
-    action_rate_weight: float = 0.8
-    torque_weight: float = 0.25
-    limit_weight: float = 0.05
-    joint_velocity_error_weight: float = 0.001
-    action_accel_weight: float = 0.6
-    regularization_clip: float = 0.8
+    regularization: ControlRegularizationCfg = ControlRegularizationCfg()
     termination_penalty: float = 100.0
 
 
-def regularization_cost(
-    term: MotionReferenceCommand, settings: UnifiedRewardCfg, env, action_accel: torch.Tensor
-) -> dict[str, torch.Tensor]:
+def regularization_cost(term: MotionReferenceCommand, settings: UnifiedRewardCfg, env) -> dict[str, torch.Tensor]:
+    """Compute uncapped HumanX costs in physical units and requested-action space.
+
+    Actions are clipped, dimensionless requests before control delay. Limits
+    are the action term's nominal snapshots, in the same joint order. Every
+    term sums over joints; only velocity/torque excess is capped per joint as
+    in HumanX's soft-limit curriculum. No independent ``dt`` scaling applies.
+    """
     robot = term.robot
     joint_ids = term.joint_ids
     action_term = env.action_manager.get_term("joint_pos")
-    action_magnitude = torch.mean(action_term.raw_actions**2, dim=-1)
-    action_rate = torch.mean((action_term.raw_actions - action_term.previous_raw_actions) ** 2, dim=-1)
-
+    cfg = settings.regularization
+    progress, strength, position_factor, velocity_factor, torque_factor = control_regularization_parameters(cfg, env)
+    action_rate = torch.sum((action_term.requested_actions - action_term.previous_requested_actions) ** 2, dim=-1)
     torque = robot.data.applied_torque[:, joint_ids]
-    effort_limit = robot.data.joint_effort_limits[:, joint_ids].clamp_min(1.0e-6)
-    torque_cost = torch.mean((torque / effort_limit) ** 2, dim=-1)
-
     joint_pos = robot.data.joint_pos[:, joint_ids]
-    limits = robot.data.joint_pos_limits[:, joint_ids]
+    limits = action_term.joint_position_limits
     midpoint = 0.5 * (limits[..., 0] + limits[..., 1])
-    half_range = (0.5 * (limits[..., 1] - limits[..., 0])).clamp_min(1.0e-6)
-    normalized_pos = torch.abs((joint_pos - midpoint) / half_range)
-    limit_cost = torch.mean((torch.relu(normalized_pos - 0.9) / 0.1) ** 2, dim=-1)
-
+    half_range = 0.5 * (limits[..., 1] - limits[..., 0])
+    lower = midpoint - position_factor * half_range
+    upper = midpoint + position_factor * half_range
     joint_vel = robot.data.joint_vel[:, joint_ids]
-    joint_velocity_error = torch.mean((joint_vel - term.reference["dof_vel"]) ** 2, dim=-1)
-
-    weighted = clipped_regularization(
-        (
-            action_magnitude,
-            action_rate,
-            torque_cost,
-            limit_cost,
-            joint_velocity_error,
-            action_accel,
+    costs = {
+        "action_rate": action_rate,
+        "torque": torch.sum(torque**2, dim=-1),
+        "position_limit": torch.sum(torch.relu(lower - joint_pos) + torch.relu(joint_pos - upper), dim=-1),
+        "velocity_limit": torch.sum(
+            (joint_vel.abs() - velocity_factor * action_term.velocity_limits).clamp(0.0, 1.0), dim=-1
         ),
-        (
-            settings.action_magnitude_weight,
-            settings.action_rate_weight,
-            settings.torque_weight,
-            settings.limit_weight,
-            settings.joint_velocity_error_weight,
-            settings.action_accel_weight,
+        "torque_limit": torch.sum(
+            (torque.abs() - torque_factor * action_term.effort_limits).clamp(0.0, 1.0), dim=-1
         ),
-        settings.regularization_clip,
-    )
+    }
+    weighted = {
+        name: value * getattr(cfg, f"{name}_weight") * strength / cfg.normalization
+        for name, value in costs.items()
+    }
+    total = sum(weighted.values())
     return {
-        "reg/action_magnitude": action_magnitude,
-        "reg/action_rate": action_rate,
-        "reg/torque": torque_cost,
-        "reg/limit": limit_cost,
-        "reg/joint_velocity_error": joint_velocity_error,
-        "reg/action_accel": action_accel,
-        "reg/total": weighted,
+        **{f"reg/{name}": value for name, value in costs.items()},
+        **{f"reg/weighted/{name}": value for name, value in weighted.items()},
+        "reg/total": total,
+        "regularization_curriculum/progress": total.new_full(total.shape, progress),
+        "regularization_curriculum/strength": total.new_full(total.shape, strength),
+        "regularization_curriculum/soft_position_limit": total.new_full(total.shape, position_factor),
+        "regularization_curriculum/soft_velocity_limit": total.new_full(total.shape, velocity_factor),
+        "regularization_curriculum/soft_torque_limit": total.new_full(total.shape, torque_factor),
     }
 
 
@@ -314,9 +371,6 @@ class UnifiedMimicReward(ManagerTermBase):
         super().__init__(cfg, env)
         self._episode_sums: dict[str, torch.Tensor] = {}
         self._body_weight_cache: dict[str, tuple[tuple, torch.Tensor | None]] = {}
-        self._previous_policy_action: torch.Tensor | None = None
-        self._previous_previous_policy_action: torch.Tensor | None = None
-        self._action_history_length = torch.zeros(self.num_envs, dtype=torch.uint8, device=self.device)
 
     def _body_weights(self, kind: str, body_names: tuple[str, ...], overrides) -> torch.Tensor | None:
         # Include values in the key so interactive edits of reward settings
@@ -328,22 +382,6 @@ class UnifiedMimicReward(ManagerTermBase):
                 weights = _resolve_body_weights(body_names, overrides, self.device)
             self._body_weight_cache[kind] = (key, weights)
         return self._body_weight_cache[kind][1]
-
-    def _action_accel(self, action: torch.Tensor) -> torch.Tensor:
-        if self._previous_policy_action is None:
-            with torch.inference_mode(False):
-                self._previous_policy_action = torch.zeros_like(action)
-                self._previous_previous_policy_action = torch.zeros_like(action)
-        cost = action_accel_cost(
-            action,
-            self._previous_policy_action,
-            self._previous_previous_policy_action,
-            self._action_history_length,
-        )
-        self._previous_previous_policy_action.copy_(self._previous_policy_action)
-        self._previous_policy_action.copy_(action)
-        self._action_history_length.add_(1).clamp_(max=2)
-        return cost
 
     def _record(self, values: dict[str, torch.Tensor]) -> None:
         for name, value in values.items():
@@ -358,7 +396,6 @@ class UnifiedMimicReward(ManagerTermBase):
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
         if env_ids is None:
             env_ids = slice(None)
-        self._action_history_length[env_ids] = 0
         duration = (
             self._env.episode_length_buf[env_ids].float() * self._env.step_dt
         ).clamp_min(self._env.step_dt)
@@ -533,9 +570,7 @@ class UnifiedMimicReward(ManagerTermBase):
             settings.global_weights,
             relative_gate=relative_gate,
         )
-        # ActionManager retains the direct policy output, before tanh, scaling, or delay.
-        action_accel = self._action_accel(env.action_manager.action)
-        regularization = regularization_cost(term, settings, env, action_accel)
+        regularization = regularization_cost(term, settings, env)
         termination = env.termination_manager.terminated.float() * settings.termination_penalty
         total = torch.nan_to_num(
             mimic

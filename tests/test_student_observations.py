@@ -40,7 +40,7 @@ def make_sensor(nominal=1, maximum=3, count=2, history=5):
                                enabled=True, start_fraction=0., end_fraction=.3, full_strength=True,
                                scales=SimpleNamespace(gravity=1., angular_velocity=1.,
                                                       joint_position=1., joint_velocity=1.,
-                                                      applied_action=1., hoop_position=1., hoop_theta=1.))
+                                                      previous_action=1., hoop_position=1., hoop_theta=1.))
     data = SimpleNamespace(projected_gravity_b=torch.zeros(count, 3),
                            root_link_quat_w=torch.tensor([1., 0., 0., 0.]).repeat(count, 1),
                            root_link_ang_vel_w=torch.zeros(count, 3), root_link_pos_w=torch.zeros(count, 3),
@@ -48,7 +48,7 @@ def make_sensor(nominal=1, maximum=3, count=2, history=5):
     motion = SimpleNamespace(robot=SimpleNamespace(data=data), joint_ids=list(range(29)),
                              command_dimension=3, command=torch.tensor([1., 0., 0.]).repeat(count, 1),
                              reference={"hoop_pos_cyl": torch.zeros(count, 3)})
-    action = SimpleNamespace(nominal=torch.zeros(count, 29), actual_action_offset=torch.zeros(count, 29))
+    action = SimpleNamespace(nominal=torch.zeros(count, 29), requested_actions=torch.zeros(count, 29))
     env = SimpleNamespace(num_envs=count, device='cpu', common_step_counter=0,
                           cfg=SimpleNamespace(student_observation=settings,
                                               dr=SimpleNamespace(steps_per_iteration=1, total_iterations=100)),
@@ -63,7 +63,7 @@ def test_five_sensor_frames_and_actions_are_aligned_and_reset_is_isolated():
     for step in range(11):
         env.common_step_counter = step
         data.joint_pos[:] = step
-        action.actual_action_offset[:] = step * 2
+        action.requested_actions[:] = step * 2
         output = sensor(env)
     fields = dict(student_observation_fields(5))
     assert output.shape == (2, 471)
@@ -78,6 +78,7 @@ def test_five_sensor_frames_and_actions_are_aligned_and_reset_is_isolated():
     data.joint_pos[0] = 99
     after = sensor(env)
     assert after[0, joint_start:joint_start + 145].eq(99).all()
+    assert after[0, -148:-3].eq(0).all()
     torch.testing.assert_close(after[1], output[1])
 
 

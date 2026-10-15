@@ -78,6 +78,7 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import bb_mimic_nt.tasks  # noqa: F401
+from bb_mimic_nt.policy_contract import load_teacher_contract, save_policy_contract
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -145,6 +146,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
+    load_teacher_contract(resume_path, env.unwrapped)
     runner.load(resume_path)
 
     # obtain the trained policy for inference
@@ -171,6 +173,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
     export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.pt")
     export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
+    save_policy_contract(env.unwrapped, export_model_dir)
 
     dt = env.unwrapped.step_dt
 

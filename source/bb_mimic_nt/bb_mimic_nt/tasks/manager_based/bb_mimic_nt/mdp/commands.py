@@ -172,11 +172,13 @@ class MotionReferenceCommand(CommandTerm):
             "error/relative_position_rmse_m": torch.zeros(self.num_envs, device=self.device),
             "error/contact_mismatch_rate": torch.zeros(self.num_envs, device=self.device),
             "control/raw_action_rms": torch.zeros(self.num_envs, device=self.device),
-            "control/raw_action_delta_rms": torch.zeros(self.num_envs, device=self.device),
+            "control/requested_action_rms": torch.zeros(self.num_envs, device=self.device),
+            "control/requested_action_delta_rms": torch.zeros(self.num_envs, device=self.device),
             "control/action_saturation_rate": torch.zeros(self.num_envs, device=self.device),
-            "control/joint_target_delta_rms_rad": torch.zeros(self.num_envs, device=self.device),
+            "control/applied_target_delta_rms_rad": torch.zeros(self.num_envs, device=self.device),
             "control/reference_joint_delta_rms_rad": torch.zeros(self.num_envs, device=self.device),
             "control/pd_error_rmse_rad": torch.zeros(self.num_envs, device=self.device),
+            "control/applied_pd_error_rmse_rad": torch.zeros(self.num_envs, device=self.device),
             "control/joint_velocity_rms_radps": torch.zeros(self.num_envs, device=self.device),
             "control/torque_limit_ratio_rms": torch.zeros(self.num_envs, device=self.device),
         }
@@ -190,7 +192,7 @@ class MotionReferenceCommand(CommandTerm):
             self.metrics[f"error/joint/{name}/position_abs_rad"] = torch.zeros(
                 self.num_envs, device=self.device
             )
-            self.metrics[f"control/joint/{name}/raw_action_abs"] = torch.zeros(
+            self.metrics[f"control/joint/{name}/requested_action_abs"] = torch.zeros(
                 self.num_envs, device=self.device
             )
         self._pickup_event_count = torch.zeros(self.num_envs, device=self.device)
@@ -369,8 +371,8 @@ class MotionReferenceCommand(CommandTerm):
         self._release_event_count[env_ids] = 0.0
         action_term = self._env.action_manager.get_term("joint_pos")
         for index, name in enumerate(self.dof_names):
-            extras[f"control/joint/{name}/residual_scale_rad"] = (
-                action_term.residual_scale[env_ids, index].mean()
+            extras[f"control/joint/{name}/action_scale_rad"] = (
+                action_term.action_scale[env_ids, index].mean()
             )
         for metric in self.metrics.values():
             metric[env_ids] = 0.0
@@ -434,8 +436,8 @@ class MotionReferenceCommand(CommandTerm):
         self._previous_reference_dof_pos[env_ids] = self.reference["dof_pos"][env_ids]
         self._write_reference_state(env_ids)
         # ManagerBasedRLEnv resets the action manager before the command
-        # manager. Synchronize after selecting the new clip/RSI frame.
-        self._env.action_manager.get_term("joint_pos").synchronize_reference(env_ids)
+        # manager. Refill delayed targets with the actual reset pose, including noise.
+        self._env.action_manager.get_term("joint_pos").reset_to_current_state(env_ids)
         self.previous_ball_above_hoop[env_ids] = (
             self.reference["object_pos"][env_ids, 2] - self.reference["hoop_pos"][env_ids, 2]
         )
@@ -530,6 +532,7 @@ class MotionReferenceCommand(CommandTerm):
         actual_contact = contact_graph(self._env)
         action_term = self._env.action_manager.get_term("joint_pos")
         raw_action = action_term.raw_actions
+        requested_action = action_term.requested_actions
         effort_limit = self.robot.data.joint_effort_limits[:, self.joint_ids].clamp_min(1.0e-6)
         joint_position_abs_error = torch.abs(joint_pos - self.reference["dof_pos"])
 
@@ -575,18 +578,24 @@ class MotionReferenceCommand(CommandTerm):
                 torch.abs(actual_contact - self.reference["contact"]), dim=-1
             ),
             "control/raw_action_rms": torch.sqrt(torch.mean(raw_action**2, dim=-1)),
-            "control/raw_action_delta_rms": torch.sqrt(
-                torch.mean((raw_action - action_term.previous_raw_actions) ** 2, dim=-1)
+            "control/requested_action_rms": torch.sqrt(torch.mean(requested_action**2, dim=-1)),
+            "control/requested_action_delta_rms": torch.sqrt(
+                torch.mean((requested_action - action_term.previous_requested_actions) ** 2, dim=-1)
             ),
-            "control/action_saturation_rate": torch.mean((torch.abs(raw_action) >= 0.999).float(), dim=-1),
-            "control/joint_target_delta_rms_rad": torch.sqrt(
-                torch.mean((action_term.desired_actions - action_term.previous_desired_actions) ** 2, dim=-1)
+            "control/action_saturation_rate": torch.mean(
+                (torch.abs(raw_action) >= action_term.cfg.action_clip).float(), dim=-1
+            ),
+            "control/applied_target_delta_rms_rad": torch.sqrt(
+                torch.mean((action_term.applied_targets - action_term.previous_applied_targets) ** 2, dim=-1)
             ),
             "control/reference_joint_delta_rms_rad": torch.sqrt(
                 torch.mean((self.reference["dof_pos"] - self._previous_reference_dof_pos) ** 2, dim=-1)
             ),
             "control/pd_error_rmse_rad": torch.sqrt(
-                torch.mean((action_term.desired_actions - joint_pos) ** 2, dim=-1)
+                torch.mean((action_term.requested_targets - joint_pos) ** 2, dim=-1)
+            ),
+            "control/applied_pd_error_rmse_rad": torch.sqrt(
+                torch.mean((action_term.applied_targets - joint_pos) ** 2, dim=-1)
             ),
             "control/joint_velocity_rms_radps": torch.sqrt(torch.mean(joint_vel**2, dim=-1)),
             "control/torque_limit_ratio_rms": torch.sqrt(
@@ -597,7 +606,7 @@ class MotionReferenceCommand(CommandTerm):
                 for index, name in enumerate(self.dof_names)
             },
             **{
-                f"control/joint/{name}/raw_action_abs": torch.abs(raw_action[:, index])
+                f"control/joint/{name}/requested_action_abs": torch.abs(requested_action[:, index])
                 for index, name in enumerate(self.dof_names)
             },
         }

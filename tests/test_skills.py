@@ -51,7 +51,7 @@ def make_command(count=10000):
     term._env = SimpleNamespace(
         step_dt=0.01,
         scene=SimpleNamespace(env_origins=torch.zeros(count, 3)),
-        action_manager=SimpleNamespace(get_term=lambda _: SimpleNamespace(synchronize_reference=lambda ids: None)),
+        action_manager=SimpleNamespace(get_term=lambda _: SimpleNamespace(reset_to_current_state=lambda ids: None)),
     )
     term.cfg = SimpleNamespace(
         randomize_clip=True,

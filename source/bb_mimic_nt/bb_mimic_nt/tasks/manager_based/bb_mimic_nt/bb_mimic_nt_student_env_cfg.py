@@ -7,13 +7,16 @@ from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
 
-from bb_mimic_nt.robots.unitree_g1_bb import G1Constants
+from bb_mimic_nt.action_math import (
+    ACTION_OBSERVATION_SCALE, ANGULAR_VELOCITY_OBSERVATION_SCALE,
+    JOINT_POSITION_OBSERVATION_SCALE, JOINT_VELOCITY_OBSERVATION_SCALE,
+)
 from bb_mimic_nt.student import STUDENT_HISTORY_LENGTH
 from bb_mimic_nt.training import NUM_ENVS
 
 from . import mdp
 from .bb_mimic_nt_env_cfg import (
-    DomainRandomizationCfg, DRPhysicsScheduleCfg, G1ShootEnvCfg, G1ShootSceneCfg, ObservationsCfg,
+    ActionsCfg, DomainRandomizationCfg, DRPhysicsScheduleCfg, G1ShootEnvCfg, G1ShootSceneCfg, ObservationsCfg,
 )
 
 
@@ -53,10 +56,10 @@ class StudentDomainRandomizationCfg(DomainRandomizationCfg):
 @configclass
 class StudentObservationScalesCfg:
     gravity: float = 1.0
-    angular_velocity: float = 0.25
-    joint_position: float = 1.0
-    joint_velocity: float = 0.05
-    applied_action: float = 1.0
+    angular_velocity: float = ANGULAR_VELOCITY_OBSERVATION_SCALE
+    joint_position: float = JOINT_POSITION_OBSERVATION_SCALE
+    joint_velocity: float = JOINT_VELOCITY_OBSERVATION_SCALE
+    previous_action: float = ACTION_OBSERVATION_SCALE
     hoop_position: float = 0.25  # Radius and height.
     hoop_theta: float = 2.0  # Absolute scale for theta in radians.
 
@@ -92,15 +95,6 @@ class StudentSceneCfg(G1ShootSceneCfg):
 
 
 @configclass
-class StudentActionsCfg:
-    joint_pos = mdp.StudentNominalJointPositionActionCfg(
-        asset_name="robot",
-        joint_names=list(G1Constants.G1_ACTUATED_JOINT_NAMES),
-        command_name="motion",
-    )
-
-
-@configclass
 class StudentObservationsCfg:
     @configclass
     class PolicyCfg(ObsGroup):
@@ -128,7 +122,7 @@ class StudentCurriculumCfg:
 class G1ShootStudentEnvCfg(G1ShootEnvCfg):
     scene: StudentSceneCfg = StudentSceneCfg(num_envs=NUM_ENVS, env_spacing=7.0)
     observations: StudentObservationsCfg = StudentObservationsCfg()
-    actions: StudentActionsCfg = StudentActionsCfg()
+    actions: ActionsCfg = ActionsCfg()
     rewards: StudentRewardsCfg = StudentRewardsCfg()
     curriculum: StudentCurriculumCfg = StudentCurriculumCfg()
     student_observation: StudentObservationSettingsCfg = StudentObservationSettingsCfg()

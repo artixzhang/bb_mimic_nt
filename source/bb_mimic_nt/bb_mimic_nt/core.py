@@ -5,50 +5,11 @@
 
 from __future__ import annotations
 
-import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 
 import torch
 
 from bb_mimic_nt.training import RSI_INITIAL_PROBABILITY
-
-
-def reference_residual_target(
-    action: torch.Tensor,
-    reference: torch.Tensor,
-    residual_scale: torch.Tensor,
-    lower: torch.Tensor,
-    upper: torch.Tensor,
-) -> torch.Tensor:
-    """Convert a normalized residual action into a safe reference-relative target."""
-    desired = reference + action.clamp(-1.0, 1.0) * residual_scale
-    return torch.maximum(torch.minimum(desired, upper), lower)
-
-
-def apply_joint_residual_caps(
-    residual_scale: torch.Tensor,
-    joint_names: Sequence[str],
-    maximum_by_joint: Mapping[str, float],
-    minimum_scale: float,
-) -> torch.Tensor:
-    """Apply validated, exact-name residual caps without changing unspecified joints."""
-    if residual_scale.shape[-1] != len(joint_names):
-        raise ValueError("Residual scale width must match the joint-name count.")
-    unknown = set(maximum_by_joint).difference(joint_names)
-    if unknown:
-        raise ValueError(f"Residual caps contain unknown joints: {sorted(unknown)}")
-    result = residual_scale.clone()
-    for index, name in enumerate(joint_names):
-        if name not in maximum_by_joint:
-            continue
-        maximum = float(maximum_by_joint[name])
-        if not math.isfinite(maximum) or maximum < minimum_scale:
-            raise ValueError(
-                f"Residual cap for {name!r} must be finite and at least minimum_residual_scale "
-                f"({minimum_scale}), got {maximum}."
-            )
-        result[..., index].clamp_(max=maximum)
-    return result
 
 
 def slerp_wxyz(first: torch.Tensor, second: torch.Tensor, blend: torch.Tensor) -> torch.Tensor:
@@ -198,27 +159,6 @@ def gated_height_shortfall_cost(
     airborne = 1.0 - reference_contact
     shortfall = torch.relu(reference_height - actual_height - allowed_shortfall)
     return torch.sum(airborne * shortfall, dim=-1)
-
-
-def clipped_regularization(
-    costs: Sequence[torch.Tensor], weights: Sequence[float], maximum: float = 0.20
-) -> torch.Tensor:
-    """Smoothly cap the weighted cost, preserving unit slope near zero."""
-    if maximum <= 0.0:
-        raise ValueError("maximum must be positive.")
-    total = sum(cost * weight for cost, weight in zip(costs, weights))
-    return maximum * torch.tanh(total / maximum)
-
-
-def action_accel_cost(
-    action: torch.Tensor,
-    previous_action: torch.Tensor,
-    previous_previous_action: torch.Tensor,
-    history_length: torch.Tensor,
-) -> torch.Tensor:
-    """Mean squared second action difference, without dt scaling like action_rate."""
-    second_difference = action - 2.0 * previous_action + previous_previous_action
-    return torch.where(history_length >= 2, torch.mean(second_difference.square(), dim=-1), 0.0)
 
 
 def downward_hoop_crossing(

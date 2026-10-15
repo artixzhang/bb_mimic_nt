@@ -20,13 +20,13 @@ PYTHONPATH=source/bb_mimic_nt python scripts/rsl_rl/export_student.py
 
 `export_source` 记录导出输入文件的 path、file、size_bytes、sha256，以及 checkpoint 的 iteration。路径只用于追溯，部署无需访问它。Teacher、motion 和 URDF 哈希保存在 manifest.provenance。
 
-从 checkpoint 导出时，仅从其归档元数据读取技能和启动关节角；不打开轨迹文件，也不读取当前 skills.yaml。早期多技能 checkpoint 即使缺少 hoop 初值、参考时长等字段也能导出。旧 phase 输入模型不能通过修改 JSON 转成 command 输入模型，必须使用多技能训练权重。
+从 checkpoint 导出时，仅从其归档元数据读取技能、机器人参数和启动关节角；不打开轨迹文件，也不读取当前 skills.yaml。当前训练元数据版本为 `bb_mimic_nt_student_training_v4`，部署配置版本为 `bb_mimic_nt_student_deployment_v4`，动作语义为 `direct_joint_position_v1`。旧 residual Teacher、旧 nominal-offset Student 和无版本导出包均不兼容，不能通过修改 JSON 转换，需重新训练。
 
 ## 默认技能和启动姿态
 
 - `default_skill`：启动时执行的技能名称，默认 `hold`；没有 hold 时选择配置中的第一个技能。
 - `initial_pose`：唯一一组启动关节角，29 个 rad 数值，严格按 `joint_names` 排列。默认取 default_skill 的第一个 clip 的第一帧。
-- `nominal_joint_position`：网络输入/输出 offset 的坐标原点，与 initial_pose 含义不同。
+- `nominal_joint_position`：关节位置观测的原点，以及零 action 对应的 PD target，与 initial_pose 含义不同。
 
 硬件启动控制器先把关节移到 initial_pose，再开始持续运行 policy，初始 command 选择 default_skill。移动到启动姿态的轨迹及速度由硬件控制器负责。不要把网络输出直接加到 initial_pose。
 
@@ -57,7 +57,7 @@ PYTHONPATH=source/bb_mimic_nt python scripts/rsl_rl/export_student.py \
 | pelvis_angular_velocity_history | 3 | pelvis/root_link 系角速度 xyz，rad/s |
 | joint_position_offset_history | 29 | 实测 q − nominal，rad |
 | joint_velocity_history | 29 | 实测 qdot，rad/s |
-| applied_action_offset_history | 29 | 已实际生效的 PD target − nominal，rad |
+| previous_action_history | 29 | 上一个策略 tick 输出经 clip 后的请求 action，无量纲，取执行延迟之前的值 |
 | hoop_pos_cyl | 3 | 外部篮筐参数 `[r, theta, z]`，单位 `[m, rad, m]` |
 
 历史按 field-major 拼接：先拼完一种观测的所有帧，再拼下一种。每种历史为 oldest-to-newest，每帧按 xyz 或 joint_names 顺序。输入维数为 `93 * history_length + 3 + command_dimension`；5 帧历史、3 维 command 时为 471。输入没有 phase、参考帧或时间进度。
@@ -70,18 +70,20 @@ hoop 是外部观测参数，不是 ONNX 常量，也不在 JSON 中保存固定
 
 ## 动作和历史
 
-Student 输出 29 维 nominal-relative position offset，单位 rad。没有额外 tanh、scale、reference 相加或 smoothing。网络外转换为：
+Teacher 和 Student 均输出 29 维无量纲 action。网络外使用 HumanX 的动作缩放逻辑：
 
 ```python
-target = clip(nominal_joint_position + network_output,
-              safe_lower_joint_position, safe_upper_joint_position)
+requested_action = clip(network_output, -action_clip, action_clip)
+target = nominal_joint_position + action_scale * requested_action
 ```
 
-所有关节数组遵循 joint_names。pd_stiffness 为 Kp（N·m/rad），pd_damping 为 Kd（N·m·s/rad）；位置限位已包含训练使用的 margin。
+`action_clip` 默认为 100；每关节 `action_scale = 0.25 * effort_limit / nominal_Kp`，单位 rad。使用导出包中的精确 scale，不根据随机化后的增益重新计算。没有 tanh、参考轨迹相加、平滑或 target 角度裁剪。
 
-转换后立即提交 PD target。下一 tick 的 action history 填实际已生效的 PD target，不填尚未生效的预测或实测关节角。
+所有关节数组遵循 joint_names。pd_stiffness 为 Kp（N·m/rad），pd_damping 为 Kd（N·m·s/rad）；joint_position_limits、velocity_limits 和 effort_limits 记录标称物理参数，其中 joint_position_limits 不参与 target 裁剪。
 
-启动时只 reset 一次：传感器历史 重复第一帧实测 gravity/gyro/q-minus-nominal/qdot；动作历史重复实际启动 target-minus-nominal。qdot 不强制清零。切换技能和更新篮筐参数不 reset 历史，也不停止网络推理。
+转换后立即提交 PD target；下一 tick 的 action history 追加本次 `requested_action`。训练中的动作延迟不改变这项观测。不要传入 raw 网络输出、PD target 或实测关节角。
+
+启动时只 reset 一次：传感器历史重复第一帧实测 gravity/gyro/q-minus-nominal/qdot，动作历史全零，qdot 不强制清零。tick 0 没有前一次策略输出，previous_requested_action 传 None 或全零；后续每个新 tick 必须提供上一次 clip 后的 action。切换技能和更新篮筐参数不 reset 历史，也不停止网络推理。
 
 ## 持续运行与多次投篮
 
@@ -102,36 +104,40 @@ cfg = json.load(open('student_config.json'))
 model = ort.InferenceSession(cfg['model']['file'], providers=['CPUExecutionProvider'])
 command_ids = {s['name']: s['command_id'] for s in cfg['skills']['definitions']}
 state = StudentObservationState(cfg)
-# 启动控制器先到 cfg['initial_pose']，读取传感器和实际生效 target。
-state.reset(gravity, gyro, q, qdot, applied_pd_target, hoop_pos_cyl)
+# 启动控制器先到 cfg['initial_pose']，读取传感器。
+state.reset(gravity, gyro, q, qdot, hoop_pos_cyl)
 
 # 第一个 tick 传 None，使用 cfg['default_skill']；之后 None 保持上一 command。
 command_id = None
+previous_requested_action = None
 for tick in range(num_ticks):
     # 外部控制器可在 tick 边界修改 command_id 和 hoop_pos_cyl。
     # 如 command_id = command_ids['shoot']；两次投篮之间修改 hoop_pos_cyl。
-    # 每个 tick 都先获取新的传感器测量和实际已生效 target。
+    # 每个 tick 都先获取新的传感器测量。
     obs = state.observe(tick, command_id, gravity, gyro, q, qdot,
-                        applied_pd_target, hoop_pos_cyl=hoop_pos_cyl)
+                        previous_requested_action=previous_requested_action,
+                        hoop_pos_cyl=hoop_pos_cyl)
     output = model.run([cfg['model']['output']['name']],
                        {cfg['model']['input']['name']: obs.numpy()})[0]
-    target = state.action_target(output[0])
-    # 提交 target，并在后续 tick 读取实际已生效的命令。
+    previous_requested_action, target = state.process_action(output[0])
+    # 将 target 提交给 PD 控制器。
 ```
 
 `observe(..., hoop_pos_cyl=None)` 保持上次篮筐参数。同一 tick 重复调用返回缓存，不再推进历史或应用新的参数；更新应在下一个 tick 提交。
 
-接口允许持续切换，但现有训练仍按 episode 固定 command 和 hoop，没有连续多次投篮的验证结论。投篮间更新避免了投篮中条件突变，但 hold/shoot 切换后的状态分布和连续执行表现仍需单独验证；本次调整没有修改训练观测或网络权重。
+`process_action()` 返回 `(requested_action, target)`，`action_target()` 仅返回 target；两者都不推进历史。`observe()` 的 previous_requested_action 为仅限关键字参数，以避免旧接口把 applied PD target 误当作 action。
 
-部署观测构建器和导出策略的仿真播放均不添加人工延迟；读取旧配置时也不会恢复其中的延迟。训练中的延迟随机化仍保留。
+接口允许持续切换，但训练仍按 episode 固定 command 和 hoop，hold/shoot 切换后的状态分布和连续执行表现仍需单独验证。
+
+部署观测构建器和导出策略的仿真播放均不添加人工延迟，训练中的传感器噪声与延迟随机化仍保留。
 
 ## 验收
 
-导出检查 ONNX 结构、TorchScript 和 ONNX ReferenceEvaluator 与 PyTorch 的数值一致性；安装 onnxruntime 后也会验证该后端。manifest 记录实际通过的项目。
+导出检查 ONNX 结构、TorchScript 和 ONNX ReferenceEvaluator 与 PyTorch 的数值一致性；安装 onnxruntime 后也会验证该后端。ONNX 输出名为 `joint_action`，verification_vectors.npz 的 `actions` 保存 raw 网络输出，`observations` 保存对应输入。manifest 记录实际通过的项目及新配置的文件哈希。
 
 ```bash
-python scripts/verify_student_bundle.py outputs/student_2026-10-12_11-32-11 --backend torchscript
-python scripts/verify_student_bundle.py outputs/student_2026-10-12_11-32-11 --backend onnxruntime
+python scripts/verify_student_bundle.py /path/to/new/student_bundle --backend torchscript
+python scripts/verify_student_bundle.py /path/to/new/student_bundle --backend onnxruntime
 ```
 
 仿真播放需要参考轨迹，由本地环境的 skills_config 或 skills_path 提供；技能名和 command ID 必须与导出包匹配。仿真使用这些本地轨迹进行 reset 和评估，不把这些需求带入真机配置。

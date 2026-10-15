@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-10-15 — HumanX 风格 Direct Action
+
+- Teacher/Student 统一无量纲动作：clip ±100，按 `0.25 × 标称力矩限值 / 标称 Kp` 缩放后加 nominal；取消 reference 叠加、tanh 和目标角度裁剪，保留原机器人参数及执行延迟。
+- 观测和历史统一使用请求动作；PD error 使用未延迟目标。reset 延迟缓存填实际含噪声 q；关节/参考关节位置改为 nominal-relative。
+- 采用 HumanX 五项控制正则并除以 16.05，使用 10%–60% 训练进度课程；PPO 初始标准差 0.8、entropy 0.01。
+- DAgger、部署和导出改为 direct action v4，增加版本及解析后参数校验，旧 Teacher/Student/replay 需要重新训练。
+
 ## 2026-10-11 — End 保持段概率采样
 
 - 新增逐技能 `end.trigger_probability`，默认 0.3；选中后完整执行 end 时长，未选中在 reference 结束后终止。hold 配置保持概率为 1，Teacher/Student/Play 使用同一规则。

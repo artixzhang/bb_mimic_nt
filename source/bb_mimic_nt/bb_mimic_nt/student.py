@@ -22,7 +22,7 @@ def student_observation_fields(history_length: int, command_dimension: int = 3) 
         ("pelvis_angular_velocity_history", 3 * history_length),
         ("joint_position_offset_history", 29 * history_length),
         ("joint_velocity_history", 29 * history_length),
-        ("applied_action_offset_history", 29 * history_length),
+        ("previous_action_history", 29 * history_length),
         ("hoop_pos_cyl", 3),
     )
 
@@ -42,19 +42,6 @@ def student_delay_bounds(nominal: int, minimum: int, maximum: int, strength: flo
     low = nominal - math.floor((nominal - minimum) * strength + 1.0e-6)
     high = nominal + math.floor((maximum - nominal) * strength + 1.0e-6)
     return low, high
-
-
-def student_teacher_target(
-    raw_residual: torch.Tensor,
-    reference: torch.Tensor,
-    residual_scale: torch.Tensor,
-    lower: torch.Tensor,
-    upper: torch.Tensor,
-    nominal: torch.Tensor,
-) -> torch.Tensor:
-    """Convert the unchanged Teacher residual into a nominal-relative joint target."""
-    target = reference + torch.tanh(raw_residual) * residual_scale
-    return torch.maximum(torch.minimum(target, upper), lower) - nominal
 
 
 def student_smoothstep(value: float) -> float:

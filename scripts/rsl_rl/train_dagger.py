@@ -40,7 +40,8 @@ from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import bb_mimic_nt.tasks  # noqa: F401
-from bb_mimic_nt.student import StudentReplay, student_execution_probability, student_mix_actions, student_teacher_target
+from bb_mimic_nt.student import StudentReplay, student_execution_probability, student_mix_actions
+from bb_mimic_nt.action_math import clip_joint_actions, joint_position_target
 from bb_mimic_nt.training import configure_training_curricula
 from bb_mimic_nt.tasks.manager_based.bb_mimic_nt.mdp.curriculums import rsi_schedule
 from bb_mimic_nt.student_runtime import (
@@ -177,28 +178,26 @@ def main(env_cfg, agent_cfg):
                 with torch.no_grad():
                     student_action = model.act_inference(observations)
                     teacher_raw = model.evaluate(observations)
-                    label = student_teacher_target(
-                        teacher_raw,
-                        motion.reference["dof_pos"],
-                        action_term.residual_scale,
-                        action_term.lower,
-                        action_term.upper,
-                        action_term.nominal,
-                    )
+                    label = clip_joint_actions(teacher_raw, action_term.cfg.action_clip)
                     executed, student_mask = student_mix_actions(label, student_action, student_probability)
-                    target_error += (student_action - label).abs().mean(dim=0)
+                    student_target = joint_position_target(
+                        student_action, action_term.nominal, action_term.action_scale, action_term.cfg.action_clip
+                    )
+                    teacher_target = joint_position_target(
+                        label, action_term.nominal, action_term.action_scale, action_term.cfg.action_clip
+                    )
+                    target_error += (student_target - teacher_target).abs().mean(dim=0)
                     if previous_student is not None:
                         valid = ~previous_done
-                        student_delta = student_action - previous_student
-                        teacher_delta = label - previous_label
+                        student_delta = student_target - previous_student
+                        teacher_delta = teacher_target - previous_label
                         delta_error += ((student_delta - teacher_delta).abs().mean(dim=-1) * valid).sum()
                         student_delta_sq += (student_delta.square().mean(dim=-1) * valid).sum()
                         teacher_delta_sq += (teacher_delta.square().mean(dim=-1) * valid).sum()
                         delta_count += valid.sum()
-                    previous_student, previous_label = student_action, label
+                    previous_student, previous_label = student_target, teacher_target
                 student_count += student_mask.sum()
                 replay.add(observations["policy"], label)
-                action_term.set_teacher_residual(teacher_raw, ~student_mask)
                 observations, _, done, info = env.step(executed)
                 previous_done = done.bool()
                 episode_steps += 1
@@ -231,12 +230,12 @@ def main(env_cfg, agent_cfg):
             writer.add_scalar("DAgger/student_probability", student_probability, iteration)
             writer.add_scalar("DAgger/student_execution_rate", execution_rate, iteration)
             joint_mae = target_error / agent_cfg.num_steps_per_env
-            writer.add_scalar("DAgger/student_teacher_action_mae", joint_mae.mean(), iteration)
+            writer.add_scalar("DAgger/student_teacher_target_mae_rad", joint_mae.mean(), iteration)
             for name, error in zip(motion.dof_names, joint_mae):
-                writer.add_scalar(f"DAgger/joint_action_mae/{name}", error, iteration)
-            writer.add_scalar("DAgger/action_delta_mae_rad", delta_error / delta_count.clamp_min(1), iteration)
-            writer.add_scalar("DAgger/student_action_delta_rms_rad", (student_delta_sq / delta_count.clamp_min(1)).sqrt(), iteration)
-            writer.add_scalar("DAgger/teacher_action_delta_rms_rad", (teacher_delta_sq / delta_count.clamp_min(1)).sqrt(), iteration)
+                writer.add_scalar(f"DAgger/joint_target_mae_rad/{name}", error, iteration)
+            writer.add_scalar("DAgger/target_delta_mae_rad", delta_error / delta_count.clamp_min(1), iteration)
+            writer.add_scalar("DAgger/student_target_delta_rms_rad", (student_delta_sq / delta_count.clamp_min(1)).sqrt(), iteration)
+            writer.add_scalar("DAgger/teacher_target_delta_rms_rad", (teacher_delta_sq / delta_count.clamp_min(1)).sqrt(), iteration)
             writer.add_scalar("DAgger/completed_episodes", completed_count, iteration)
             if completed_count.item() > 0:
                 writer.add_scalar("DAgger/failure_fraction", failure_count / completed_count, iteration)

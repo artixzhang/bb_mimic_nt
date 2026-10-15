@@ -107,14 +107,14 @@ class StudentObservation(ManagerTermBase):
                 sensor = sensor + (
                     torch.randn_like(sensor) * self._noise_std * settings.noise_strength * self.curriculum_strength
                 )
-            applied_action = action.actual_action_offset
+            previous_action = action.requested_actions
             reset_ids = ids[self._pending_reset[ids]]
             if len(reset_ids):
                 self._initial_hoop[reset_ids] = motion.reference["hoop_pos_cyl"][reset_ids]
                 self._sensor[:, reset_ids] = sensor[reset_ids]
-                self._action[:, reset_ids] = applied_action[reset_ids]
             self._sensor[self._sensor_cursor[ids], ids] = sensor[ids]
-            self._action[self._action_cursor[ids], ids] = applied_action[ids]
+            self._action[self._action_cursor[ids], ids] = previous_action[ids]
+            self._action[:, reset_ids] = 0.0
             self._last_step[ids] = step
             self._pending_reset[ids] = False
 
@@ -133,7 +133,7 @@ class StudentObservation(ManagerTermBase):
                 sensor_frames[:, :, 3:6].flatten(1) * scales.angular_velocity,
                 sensor_frames[:, :, 6:35].flatten(1) * scales.joint_position,
                 sensor_frames[:, :, 35:64].flatten(1) * scales.joint_velocity,
-                action_frames.flatten(1) * scales.applied_action,
+                action_frames.flatten(1) * scales.previous_action,
                 self._initial_hoop * self._initial_hoop.new_tensor(
                     [scales.hoop_position, scales.hoop_theta, scales.hoop_position]
                 ),

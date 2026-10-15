@@ -20,8 +20,10 @@ for name, expected in manifest['artifacts_sha256'].items():
         raise ValueError(f'Bundle checksum mismatch: {name}')
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "source/bb_mimic_nt"))
 config = json.loads((args.bundle / 'student_config.json').read_text())
+from bb_mimic_nt.student_deployment import validate_student_metadata
+validate_student_metadata(config)
 vectors = np.load(args.bundle / 'verification_vectors.npz', allow_pickle=False)
-inputs, expected = vectors['observations'], vectors['action_offsets']
+inputs, expected = vectors['observations'], vectors['actions']
 if inputs.ndim != 2 or inputs.shape[1] != config['observation_dim']:
     raise ValueError('Verification observation shape differs from configuration.')
 if expected.shape != (inputs.shape[0], config['action_dim']):

@@ -18,8 +18,10 @@ from bb_mimic_nt.student import (
 )
 from bb_mimic_nt.student_deployment import (
     build_deployment_contract, compact_student_config, student_observation_scales,
-    student_simulation_skill_config,
+    student_simulation_skill_config, validate_student_metadata,
+    STUDENT_TRAINING_FORMAT, STUDENT_ACTION_SEMANTICS,
 )
+from bb_mimic_nt.policy_contract import build_policy_contract, load_teacher_contract, validate_policy_contract
 
 
 class StudentYamlLoader(yaml.SafeLoader):
@@ -63,18 +65,12 @@ def student_teacher_configs(checkpoint: Path) -> tuple[dict, dict]:
 def student_apply_teacher_config(env_cfg, checkpoint: Path) -> tuple[dict, dict]:
     """Copy Teacher action/range settings while preserving Student curricula and play flags."""
     agent, environment = student_teacher_configs(checkpoint)
+    contract = load_teacher_contract(checkpoint)
     teacher_action = environment["actions"]["joint_pos"]
-    for name in (
-        "residual_scale_fraction",
-        "minimum_residual_scale",
-        "maximum_residual_scale",
-        "position_limit_margin",
-    ):
+    for name in ("action_scale_factor", "action_clip"):
         setattr(env_cfg.actions.joint_pos, name, float(teacher_action[name]))
-    env_cfg.actions.joint_pos.joint_maximum_residual_scales = {
-        str(name): float(value)
-        for name, value in teacher_action.get("joint_maximum_residual_scales", {}).items()
-    }
+    env_cfg.actions.joint_pos.nominal_joint_position = list(contract['nominal_joint_position'])
+    env_cfg.actions.joint_pos.action_scale_values = list(contract['action_scale'])
     teacher_dr = environment["dr"]
     scalar_names = (
         "delay_nominal_steps",
@@ -122,23 +118,9 @@ def student_validate_teacher(environment: dict, env) -> None:
     archived_action = environment["actions"]["joint_pos"]
     if archived_action["joint_names"] != list(action.cfg.joint_names):
         raise ValueError("Teacher checkpoint joint order differs from the Student environment.")
-    for name in (
-        "residual_scale_fraction",
-        "minimum_residual_scale",
-        "maximum_residual_scale",
-        "position_limit_margin",
-    ):
+    for name in ("action_scale_factor", "action_clip"):
         if abs(float(archived_action[name]) - float(getattr(action.cfg, name))) > 1.0e-8:
             raise ValueError(f"Teacher action setting {name} differs from the Student adapter.")
-    archived_caps = {
-        str(name): float(value)
-        for name, value in archived_action.get("joint_maximum_residual_scales", {}).items()
-    }
-    current_caps = {
-        str(name): float(value) for name, value in action.cfg.joint_maximum_residual_scales.items()
-    }
-    if archived_caps != current_caps:
-        raise ValueError("Teacher per-joint residual caps differ from the Student adapter.")
     dimensions = env.observation_manager.group_obs_dim
     observation_dim = sum(size for _, size in student_observation_fields(env.cfg.student_observation.history_length, env.command_manager.get_term("motion").command_dimension))
     expected = {"policy": (observation_dim,), "teacher": (673 + env.command_manager.get_term("motion").command_dimension,)}
@@ -151,6 +133,7 @@ def student_validate_teacher(environment: dict, env) -> None:
 def student_load_teacher(checkpoint: Path, observations, student_cfg, env) -> tuple[StudentTeacher, dict]:
     """Construct the official RSL-RL StudentTeacher module and load only the Teacher actor."""
     agent, environment = student_teacher_configs(checkpoint)
+    load_teacher_contract(checkpoint, env)
     student_validate_teacher(environment, env)
     policy_cfg = agent["policy"]
     if policy_cfg["class_name"] != "ActorCritic":
@@ -195,38 +178,27 @@ def student_metadata(env, student_cfg, teacher_checkpoint: Path | None = None) -
         delay_settings.delay_max_steps - delay_settings.delay_nominal_steps, 1,
     )
     metadata = {
-        "format": "bb_mimic_nt_student_training_v3",
+        "format": STUDENT_TRAINING_FORMAT,
         "observation_dim": sum(size for _, size in fields),
         "observation_fields": [{"name": name, "size": size} for name, size in fields],
         "history_length": env.cfg.student_observation.history_length,
         "command_dimension": env.command_manager.get_term("motion").command_dimension,
         "history_order": "oldest_to_newest",
         "action_dim": STUDENT_ACTION_DIM,
-        "action_semantics": "joint_position_radians_minus_nominal_pose",
+        "action_semantics": STUDENT_ACTION_SEMANTICS,
+        "policy_contract": build_policy_contract(env),
         "joint_names": list(action.cfg.joint_names),
         "nominal_joint_position": action.nominal[0].detach().cpu().tolist(),
-        "safe_lower_joint_position": action.lower[0].detach().cpu().tolist(),
-        "safe_upper_joint_position": action.upper[0].detach().cpu().tolist(),
+        "action_scale": action.action_scale[0].detach().cpu().tolist(),
+        "action_clip": float(action.cfg.action_clip),
+        "effort_limits": action.effort_limits[0].detach().cpu().tolist(),
+        "velocity_limits": action.velocity_limits[0].detach().cpu().tolist(),
+        "joint_position_limits": action.joint_position_limits[0].detach().cpu().tolist(),
         "pd_stiffness": robot.data.default_joint_stiffness[0, joint_ids].detach().cpu().tolist(),
         "pd_damping": robot.data.default_joint_damping[0, joint_ids].detach().cpu().tolist(),
         "policy_hz": 1.0 / env.step_dt,
         "student_hidden_dims": list(student_cfg.policy.student_hidden_dims),
         "activation": student_cfg.policy.activation,
-        "action_adapter": {
-            **{
-                name: float(getattr(action.cfg, name))
-                for name in (
-                    "residual_scale_fraction",
-                    "minimum_residual_scale",
-                    "maximum_residual_scale",
-                    "position_limit_margin",
-                )
-            },
-            "joint_maximum_residual_scales": {
-                str(name): float(value)
-                for name, value in action.cfg.joint_maximum_residual_scales.items()
-            },
-        },
         "observation_settings": inference_observation,
         "training_observation_settings": training_observation,
         "default_action_delay_steps": env.cfg.dr.delay_nominal_steps,
@@ -241,6 +213,7 @@ def student_metadata(env, student_cfg, teacher_checkpoint: Path | None = None) -
             metadata["teacher_sha256"] = hashlib.file_digest(stream, "sha256").hexdigest()
     motion = env.command_manager.get_term("motion")
     metadata["deployment_contract"] = build_deployment_contract(motion._batch)
+    validate_student_metadata(metadata)
     return metadata
 
 
@@ -250,6 +223,7 @@ def student_read_artifact(weights: Path, config: Path | None = None) -> tuple[di
     if isinstance(state, dict) and state.get("format") == "bb_mimic_nt_student_dagger_v1":
         if "student" not in state or "metadata" not in state:
             raise ValueError("Student DAgger checkpoint is missing weights or deployment metadata.")
+        validate_student_metadata(state['metadata'])
         return state["student"], state["metadata"]
     config = config or weights.with_name("student_config.json")
     if not config.is_file():
@@ -258,6 +232,7 @@ def student_read_artifact(weights: Path, config: Path | None = None) -> tuple[di
             "Pass --student-config or use a self-contained model_*.pt checkpoint."
         )
     metadata = json.loads(config.read_text(encoding="utf-8"))
+    validate_student_metadata(metadata)
     manifest_path = config.with_name("manifest.json")
     if "observation" in metadata and manifest_path.is_file():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -267,6 +242,11 @@ def student_read_artifact(weights: Path, config: Path | None = None) -> tuple[di
 
 def student_validate_resume_observation(previous: dict, current: dict) -> None:
     """Allow curriculum timing changes while rejecting incompatible replay inputs."""
+    validate_student_metadata(previous)
+    validate_student_metadata(current)
+    if previous['format'] != STUDENT_TRAINING_FORMAT or current['format'] != STUDENT_TRAINING_FORMAT:
+        raise ValueError('Resume requires a direct-action Student training checkpoint.')
+    validate_policy_contract(previous['policy_contract'], current['policy_contract'])
     if previous["observation_dim"] != current["observation_dim"]:
         raise ValueError("Resume history dimension differs; five-frame Student requires a new training run.")
     if previous.get('command_dimension') != current.get('command_dimension'):
@@ -289,6 +269,7 @@ def student_validate_resume_observation(previous: dict, current: dict) -> None:
 
 def student_policy_from_state(state: dict, metadata: dict, device: str) -> StudentPolicy:
     """Construct a deployable Student policy from an already-loaded state dictionary."""
+    validate_student_metadata(metadata)
     policy = StudentPolicy(
         metadata["student_hidden_dims"], metadata["activation"], metadata["observation_dim"]
     ).to(device)
@@ -302,62 +283,51 @@ def student_load_policy(weights: Path, config: Path | None, device: str) -> tupl
 
 
 def student_apply_deployment_config(env_cfg, metadata: dict) -> None:
-    # Deployment always consumes current samples and applies targets immediately.
+    """Apply the archived direct-action interface with immediate deployment timing."""
+    metadata = compact_student_config(metadata)
     env_cfg.student_observation.delay_nominal_steps = 0
     env_cfg.student_observation.delay_min_steps = 0
     env_cfg.student_observation.delay_max_steps = 0
     env_cfg.student_observation.randomize_delay = False
+    env_cfg.student_observation.enable_noise = False
     env_cfg.dr.delay_nominal_steps = 0
     env_cfg.dr.delay_max_offset_steps = 0
-    if "observation" in metadata:
-        motion_cfg = env_cfg.commands.motion
-        simulation_config = getattr(motion_cfg, 'skills_config', None)
-        if simulation_config is None and getattr(motion_cfg, 'skills_path', None):
-            from .skills import load_skill_config
-            simulation_config = load_skill_config(motion_cfg.skills_path)
-        motion_cfg.skills_config = student_simulation_skill_config(metadata, simulation_config)
-        env_cfg.student_observation.history_length = metadata["history_length"]
-        for name, value in student_observation_scales(metadata).items():
-            if name == "skill_command":
-                continue
-            if name == "hoop_position":
-                radius, theta, height = value if isinstance(value, (list, tuple)) else (value,) * 3
-                if radius != height:
-                    raise ValueError("Simulation requires matching hoop radius and height scales.")
-                env_cfg.student_observation.scales.hoop_theta = float(theta)
-                value = radius
-            setattr(env_cfg.student_observation.scales, name, float(value))
-        env_cfg.student_observation.enable_noise = False
-        # The simulation consumes the exact exported coordinates/limits; it
-        # does not reconstruct them from Teacher residual adapter parameters.
-        for name in ("nominal_joint_position", "safe_lower_joint_position", "safe_upper_joint_position"):
-            setattr(env_cfg.actions.joint_pos, name, list(metadata[name]))
-        return
-    contract = metadata.get("deployment_contract")
-    if contract is not None:
-        env_cfg.commands.motion.skills_config = contract["skills"]["config"]
-    settings = metadata["observation_settings"]
-    env_cfg.student_observation.history_length = metadata["history_length"]
-    env_cfg.student_observation.scales.hoop_theta = float(
-        settings["scales"].get("hoop_theta", settings["scales"].get("hoop_position", 0.25))
-    )
-    for name, value in settings["scales"].items():
+    motion_cfg = env_cfg.commands.motion
+    simulation_config = getattr(motion_cfg, 'skills_config', None)
+    if simulation_config is None and getattr(motion_cfg, 'skills_path', None):
+        from .skills import load_skill_config
+        simulation_config = load_skill_config(motion_cfg.skills_path)
+    motion_cfg.skills_config = student_simulation_skill_config(metadata, simulation_config)
+    env_cfg.student_observation.history_length = metadata['history_length']
+    for name, value in student_observation_scales(metadata).items():
+        if name == 'skill_command':
+            continue
+        if name == 'hoop_position':
+            radius, theta, height = value if isinstance(value, (list, tuple)) else (value,) * 3
+            if radius != height:
+                raise ValueError('Simulation requires matching hoop radius and height scales.')
+            env_cfg.student_observation.scales.hoop_theta = float(theta)
+            value = radius
         setattr(env_cfg.student_observation.scales, name, float(value))
-    for name in ("gravity_noise_std", "angular_velocity_noise_std",
-                 "joint_position_noise_std", "joint_velocity_noise_std"):
-        setattr(env_cfg.student_observation, name, settings[name])
-    env_cfg.student_observation.enable_noise = False
-    for name, value in metadata["action_adapter"].items():
-        setattr(env_cfg.actions.joint_pos, name, value)
+    action = env_cfg.actions.joint_pos
+    action.nominal_joint_position = list(metadata['nominal_joint_position'])
+    action.action_scale_values = list(metadata['action_scale'])
+    action.action_clip = float(metadata['action_clip'])
 
 
 def student_validate_deployment(env, metadata: dict) -> None:
-    """Check the policy interface while allowing different simulation settings."""
-    if env.observation_manager.group_obs_dim["policy"] != (metadata["observation_dim"],):
-        raise ValueError("Student export observation dimension does not match the environment.")
-    action = env.action_manager.get_term("joint_pos")
-    if metadata["joint_names"] != list(action.cfg.joint_names):
-        raise ValueError("Student export joint order does not match the environment.")
+    """Reject incompatible robot/observation interfaces before running the policy."""
+    validate_student_metadata(metadata)
+    if env.observation_manager.group_obs_dim['policy'] != (metadata['observation_dim'],):
+        raise ValueError('Student export observation dimension does not match the environment.')
+    current = build_policy_contract(env)
+    if metadata['joint_names'] != current['joint_names']:
+        raise ValueError('Student export joint order does not match the environment.')
+    for name in ('nominal_joint_position', 'action_scale', 'action_clip', 'pd_stiffness',
+                 'pd_damping', 'effort_limits', 'velocity_limits', 'joint_position_limits', 'policy_hz'):
+        if not torch.allclose(torch.tensor(metadata[name], dtype=torch.float64),
+                              torch.tensor(current[name], dtype=torch.float64), rtol=1.e-6, atol=1.e-6):
+            raise ValueError(f'Student export {name} does not match the environment.')
 
 
 def student_prepare_export_metadata(metadata: dict, provenance: dict | None = None, **startup) -> dict:
@@ -451,7 +421,7 @@ def student_export(
         [output_name], {input_name: inputs.numpy()}
     )[0]
     np.testing.assert_allclose(reference_output, expected.numpy(), rtol=1.e-4, atol=1.e-5)
-    np.savez(destination / "verification_vectors.npz", observations=inputs.numpy(), action_offsets=expected.numpy())
+    np.savez(destination / "verification_vectors.npz", observations=inputs.numpy(), actions=expected.numpy())
     # One canonical configuration serves simulation and robot deployment.
     # Remove the obsolete generated duplicate when re-exporting an old bundle.
     obsolete = destination / "deployment_config.json"

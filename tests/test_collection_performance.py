@@ -37,7 +37,7 @@ def legacy_episode_metrics(self, env_ids):
     self._release_event_count[env_ids] = 0.0
     action_term = self._env.action_manager.get_term('joint_pos')
     for index, name in enumerate(self.dof_names):
-        extras[f'control/joint/{name}/residual_scale_rad'] = action_term.residual_scale[env_ids, index].mean().item()
+        extras[f'control/joint/{name}/action_scale_rad'] = action_term.action_scale[env_ids, index].mean().item()
     for metric in self.metrics.values():
         metric[env_ids] = 0.0
     stage_time = self.stage_duration[env_ids]
@@ -58,7 +58,7 @@ def test_episode_logging_matches_legacy_and_preserves_other_envs(device, ids):
     term = SimpleNamespace(
         _env=SimpleNamespace(episode_length_buf=tensor([0, 4, 9]), step_dt=.01,
                             action_manager=SimpleNamespace(get_term=lambda _: SimpleNamespace(
-                                residual_scale=tensor([[.2, .3], [.4, .5], [.6, .7]])))),
+                                action_scale=tensor([[.2, .3], [.4, .5], [.6, .7]])))),
         metrics=metrics, last_episode_metrics={k: torch.zeros_like(v) for k, v in metrics.items()},
         _time_averaged_metric_names=("error",),
         last_episode_clip_ids=torch.zeros(3, device=device, dtype=torch.long),

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from bb_mimic_nt.core import reference_residual_target
+from bb_mimic_nt.action_math import clip_joint_actions
 from bb_mimic_nt.student import (
     STUDENT_OBSERVATION_DIM,
     STUDENT_OBSERVATION_FIELDS,
@@ -18,21 +18,16 @@ from bb_mimic_nt.student import (
     student_history,
     student_delay_bounds,
     student_mix_actions,
-    student_teacher_target,
 )
 
 
-def test_student_contract_and_teacher_target_equivalence() -> None:
+def test_student_contract_and_teacher_labels_use_dimensionless_requests() -> None:
     assert sum(size for _, size in STUDENT_OBSERVATION_FIELDS) == STUDENT_OBSERVATION_DIM == 471
-    raw = torch.tensor([[-3.0, 0.0, 3.0]])
-    reference = torch.tensor([[0.3, 0.0, -0.4]])
-    scale = torch.tensor([[0.5, 0.5, 0.5]])
-    lower = torch.tensor([[0.0, -0.2, -0.5]])
-    upper = torch.tensor([[0.6, 0.2, 0.0]])
-    nominal = torch.tensor([[0.1, 0.0, -0.1]])
-    label = student_teacher_target(raw, reference, scale, lower, upper, nominal)
-    expected = reference_residual_target(torch.tanh(raw), reference, scale, lower, upper) - nominal
-    torch.testing.assert_close(label, expected)
+    assert STUDENT_OBSERVATION_FIELDS[-2] == ('previous_action_history', 145)
+    raw = torch.tensor([[-300.0, .3, 150.0]])
+    label = clip_joint_actions(raw)
+    torch.testing.assert_close(label, torch.tensor([[-100.0, .3, 100.0]]))
+    torch.testing.assert_close(raw, torch.tensor([[-300.0, .3, 150.0]]))
 
 
 def test_student_history_is_per_environment_and_oldest_first() -> None:

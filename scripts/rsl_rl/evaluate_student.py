@@ -34,7 +34,7 @@ from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import bb_mimic_nt.tasks  # noqa: F401
-from bb_mimic_nt.student import student_teacher_target
+from bb_mimic_nt.action_math import clip_joint_actions
 from bb_mimic_nt.student_runtime import (
     student_apply_deployment_config,
     student_apply_teacher_config,
@@ -101,18 +101,7 @@ def main(env_cfg, agent_cfg):
                                 output = student(observations["policy"])
                             else:
                                 teacher_raw = teacher.evaluate(observations)
-                                output = student_teacher_target(
-                                    teacher_raw,
-                                    motion.reference["dof_pos"],
-                                    action.residual_scale,
-                                    action.lower,
-                                    action.upper,
-                                    action.nominal,
-                                )
-                                action.set_teacher_residual(
-                                    teacher_raw,
-                                    torch.ones(base.num_envs, dtype=torch.bool, device=base.device),
-                                )
+                                output = clip_joint_actions(teacher_raw, action.cfg.action_clip)
                         observations, _, _, _ = env.step(output)
                         if bool(torch.all(metrics.landed[:count])):
                             break

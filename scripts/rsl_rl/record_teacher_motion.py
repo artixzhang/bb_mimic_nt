@@ -189,7 +189,10 @@ def main(env_cfg, agent_cfg):
     raw_env = env.unwrapped
     try:
         runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-        runner.load(retrieve_file_path(args.checkpoint))
+        from bb_mimic_nt.policy_contract import load_teacher_contract
+        checkpoint = retrieve_file_path(args.checkpoint)
+        load_teacher_contract(checkpoint, raw_env)
+        runner.load(checkpoint)
         policy = runner.get_inference_policy(device=raw_env.device)
         motion = raw_env.command_manager.get_term('motion')
         clips = []
