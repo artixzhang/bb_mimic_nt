@@ -55,6 +55,23 @@ python scripts/rsl_rl/train.py \
 
 `training.py` 集中配置 RSI 初始概率、退出比例，以及 PPO rollout 与 iteration 的默认值。训练入口把实际 `--max_iterations` 和 `num_steps_per_env` 写入 DR 与 RSI 课程；恢复训练时从 checkpoint iteration 接续。
 
+### 多卡训练与 CUDA 越界排查
+
+例如每卡 8192 个环境、4 卡训练：
+
+```bash
+/workspace/isaaclab/_isaac_sim/python.sh -m torch.distributed.run \
+  --standalone --nnodes=1 --nproc_per_node=4 \
+  scripts/rsl_rl/train.py --task BbMimicNT-G1-Shoot-v0 \
+  --headless --distributed --num_envs 8192 --max_iterations 3000
+```
+
+多卡默认对前馈 PPO 使用 CPU `randperm`，再把索引同步传到该进程的 GPU，绕开 GPU 随机排列生成路径。每轮先检查 rollout 是否完整、各字段尺寸是否一致、传输后的索引是否在本地 batch 范围内；异常会在取样前报告 rank、device 和尺寸/范围，不裁剪或重试错误索引。当前参数每轮传输约 3 MiB 索引，保持每轮一次打乱、各 epoch 复用，以及 RSL-RL 的 minibatch 切分方式。该改动只作用于当前 runner 的 storage。单卡和 recurrent policy 默认保留原采样器；单卡可用 `--ppo_minibatch_indices cpu` 启用检查，多卡可用 `--ppo_minibatch_indices native` 对照原采样器。
+
+这项规避针对一次约 146 iteration 的崩溃：最先发生 `IndexKernel.cu: index out of bounds`，随后才出现 NCCL 等待超时；异步堆栈落在 PPO `policy.act()`。索引 kernel 的规模和末尾位置与 676 维 observation minibatch 相符，因此优先排查 PPO 取批。尚未用同步 CUDA 堆栈确认具体底层故障，也未在当前无 GPU 驱动的检查环境中完成四卡复现，不能据此认定是 PyTorch `randperm` 的已知缺陷。
+
+若仍崩溃，在上述脚本参数末尾添加 `--debug_cuda`，它会在启动模拟器前设置 `CUDA_LAUNCH_BLOCKING=1`，让错误指向实际失败的操作；该模式较慢，仅用于诊断。需要分 rank 保存日志时，在 `scripts/rsl_rl/train.py` **之前**增加 torchrun 参数 `--log-dir logs/torchrun_debug --tee 3`。多卡入口开启完整 Hydra 堆栈和 torchrun 错误记录，并在 worker 异常后立即退出，避免 CUDA 出错后的模拟器析构阻塞、让其他 rank 再等待 10 分钟。
+
 ## 多技能配置与采样
 
 训练配置位于 `source/bb_mimic_nt/assets/trajectory/skills.yaml`，支持 `defaults` 和每个技能的局部覆盖。初始化目前只支持 `robot/ball/hoop: reference`，沿用轨迹初始化及现有 reset 关节噪声。可通过 `env.commands.motion.skills_path=/absolute/path/skills.yaml` 选择另一份配置。

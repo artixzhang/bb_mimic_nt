@@ -8,7 +8,9 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import os
 import sys
+import traceback
 
 from isaaclab.app import AppLauncher
 
@@ -30,12 +32,27 @@ parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy 
 parser.add_argument(
     "--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes."
 )
+parser.add_argument(
+    "--ppo_minibatch_indices", choices=("auto", "cpu", "native"), default="auto",
+    help="PPO shuffle indices: auto uses checked CPU permutations for distributed training; native keeps RSL-RL sampling.",
+)
+parser.add_argument(
+    "--debug_cuda", action="store_true",
+    help="Synchronize CUDA launches to report the operation that first fails (slower; for diagnosis only).",
+)
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
+
+# Set before SimulationApp initializes CUDA. Full Hydra errors also let torchrun
+# record the original worker exception instead of only a later NCCL timeout.
+if args_cli.debug_cuda:
+    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+if args_cli.debug_cuda or args_cli.distributed:
+    os.environ["HYDRA_FULL_ERROR"] = "1"
 
 # always enable cameras to record video
 if args_cli.video:
@@ -73,9 +90,9 @@ if version.parse(installed_version) < version.parse(RSL_RL_VERSION):
 """Rest everything follows."""
 
 import gymnasium as gym
-import os
 import torch
 from datetime import datetime
+from torch.distributed.elastic.multiprocessing.errors import record
 
 import omni
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
@@ -99,6 +116,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import bb_mimic_nt.tasks  # noqa: F401
 from bb_mimic_nt.training import configure_training_curricula
 from bb_mimic_nt.policy_contract import load_teacher_contract, save_policy_contract
+from bb_mimic_nt.ppo_minibatches import install_cpu_minibatch_sampler
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -131,6 +149,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # multi-gpu training configuration
     if args_cli.distributed:
+        # Bind PyTorch before creating the simulator environment, not just later
+        # when RSL-RL initializes its process group and storage.
+        torch.cuda.set_device(app_launcher.local_rank)
         env_cfg.sim.device = f"cuda:{app_launcher.local_rank}"
         agent_cfg.device = f"cuda:{app_launcher.local_rank}"
 
@@ -197,6 +218,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
+    use_cpu_indices = args_cli.ppo_minibatch_indices == "cpu" or (
+        args_cli.ppo_minibatch_indices == "auto" and args_cli.distributed
+    )
+    if use_cpu_indices and agent_cfg.class_name == "OnPolicyRunner":
+        installed = install_cpu_minibatch_sampler(runner.alg)
+        print(
+            f"[INFO][rank {os.environ.get('RANK', '0')}] PPO minibatch indices: "
+            f"{'checked CPU permutation' if installed else 'native recurrent sampler'}; "
+            f"device={agent_cfg.device}, torch={torch.__version__}, rsl-rl={installed_version}",
+            flush=True,
+        )
     # write git state to logs
     runner.add_git_repo_to_log(__file__)
     # load the checkpoint
@@ -227,7 +259,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
 
 if __name__ == "__main__":
-    # run the main function
-    main()
+    try:
+        record(main)()
+    except BaseException:
+        if args_cli.distributed:
+            # A device-side assertion leaves CUDA unusable. Simulator teardown
+            # can hang in that state, hiding this worker's failure from torchrun
+            # while its peers wait in NCCL. The error recorder ran above; exit
+            # promptly so torchrun terminates the other workers as well.
+            traceback.print_exc()
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(1)
+        raise
     # close sim app
     simulation_app.close()
