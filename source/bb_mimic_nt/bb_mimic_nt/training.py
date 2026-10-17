@@ -1,11 +1,11 @@
 # Copyright (c) 2022-2025, The Isaac Lab Project Developers.
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Shared defaults for Teacher PPO, Student DAgger, and environment curricula."""
+"""Shared defaults for Teacher PPO, Student PPO+BC, and environment curricula."""
 
 NUM_ENVS = 8192  # Per process; shared by Teacher and Student training scenes.
 PPO_STEPS_PER_ENV = 48
-PPO_MAX_ITERATIONS = 8_000
+PPO_MAX_ITERATIONS = 7_000
 RSI_INITIAL_PROBABILITY = 0.3
 RSI_DECAY_FRACTION = 0.15
 TOTAL_POLICY_STEPS = PPO_STEPS_PER_ENV * PPO_MAX_ITERATIONS
@@ -13,10 +13,8 @@ RSI_DECAY_STEPS = int(TOTAL_POLICY_STEPS * RSI_DECAY_FRACTION)
 TEACHER_OBSERVATION_DIM = 676  # Default three-dimensional skill command.
 TEACHER_HISTORY_LENGTH = 5
 
-DAGGER_STEPS_PER_ENV = PPO_STEPS_PER_ENV
-# Keep at least one complete rollout in the recent half of replay.
-DAGGER_REPLAY_CAPACITY = 2 * NUM_ENVS * max(32, DAGGER_STEPS_PER_ENV)
-DAGGER_BATCH_SIZE = NUM_ENVS
+STUDENT_STEPS_PER_ENV = PPO_STEPS_PER_ENV
+STUDENT_BATCH_SIZE = NUM_ENVS
 
 
 def configure_training_curricula(env_cfg, total_iterations: int, steps_per_iteration: int, *, motion_cfg=None) -> None:

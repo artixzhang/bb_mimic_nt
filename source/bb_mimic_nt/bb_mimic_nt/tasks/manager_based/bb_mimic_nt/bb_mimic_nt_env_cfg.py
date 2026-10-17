@@ -90,24 +90,24 @@ class DRGaussianNoiseCfg:
 @configclass
 class DRRotationNoiseCfg:
     enabled: bool = True
-    max_angle_deg: float = 10.0
+    max_angle_deg: float = 3.0
 
 
 @configclass
 class DRObjectPositionNoiseCfg:
     enabled: bool = True
-    half_range_m: float = 0.1
+    half_range_m: float = 0.02
 
 
 @configclass
 class DRInitialStateCfg:
     enabled: bool = True
-    dof_pos: DRGaussianNoiseCfg = DRGaussianNoiseCfg(std=0.1)
+    dof_pos: DRGaussianNoiseCfg = DRGaussianNoiseCfg(std=0.03)
     dof_vel: DRGaussianNoiseCfg = DRGaussianNoiseCfg(std=0.01)
-    root_pos: DRGaussianNoiseCfg = DRGaussianNoiseCfg(std=0.02)
+    root_pos: DRGaussianNoiseCfg = DRGaussianNoiseCfg(std=0.01)
     root_rot: DRRotationNoiseCfg = DRRotationNoiseCfg()
-    root_vel: DRGaussianNoiseCfg = DRGaussianNoiseCfg(std=0.05)
-    root_ang_vel: DRGaussianNoiseCfg = DRGaussianNoiseCfg(std=0.02)
+    root_vel: DRGaussianNoiseCfg = DRGaussianNoiseCfg(std=0.02)
+    root_ang_vel: DRGaussianNoiseCfg = DRGaussianNoiseCfg(std=0.01)
     object_pos: DRObjectPositionNoiseCfg = DRObjectPositionNoiseCfg()
 
 
@@ -130,19 +130,19 @@ class DomainRandomizationCfg:
     # All four Push intervals use independent continuous uniform sampling.
     # Timers span episode resets; reset clears active pulses, not deadlines.
     push_force_min_n: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    push_force_max_n: tuple[float, float, float] = (70.0, 70.0, 50.0)
+    push_force_max_n: tuple[float, float, float] = (60.0, 60.0, 40.0)
     push_torque_max_nm: float = 5.0
     push_duration_s: float = 0.1
     push_probability: float = 0.8
-    push_interval_range_s: tuple[float, float] = (1.0, 5.0)
+    push_interval_range_s: tuple[float, float] = (3.0, 6.0)
     push_link_weights: dict[str, float] = {"torso_link": 0.5, "pelvis": 0.5}
 
     global_push_force_min_n: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    global_push_force_max_n: tuple[float, float, float] = (10.0, 10.0, 10.0)
+    global_push_force_max_n: tuple[float, float, float] = (8.0, 8.0, 5.0)
     global_push_torque_max_nm: float = 2.0
     global_push_duration_s: float = 0.3
     global_push_probability: float = 0.8
-    global_push_interval_range_s: tuple[float, float] = (1.0, 5.0)
+    global_push_interval_range_s: tuple[float, float] = (3.0, 6.0)
     global_push_link_weights: dict[str, float] = {"torso_link": 0.5, "pelvis": 0.5}
 
     object_push_force_min_n: tuple[float, float, float] = (0.0, 0.0, 0.0)
@@ -150,13 +150,13 @@ class DomainRandomizationCfg:
     object_push_torque_max_nm: float = 0.0
     object_push_duration_s: float = 0.1
     object_push_probability: float = 0.6
-    object_push_interval_range_s: tuple[float, float] = (1.0, 5.0)
+    object_push_interval_range_s: tuple[float, float] = (3.0, 6.0)
 
     # Additive root-link velocity impulses in world coordinates, independent of forces.
-    velocity_push_interval_range_s: tuple[float, float] = (1.0, 5.0)
+    velocity_push_interval_range_s: tuple[float, float] = (3.0, 6.0)
     velocity_push_probability: float = 1.0
-    velocity_push_linear_max_m_s: float = 0.5
-    velocity_push_angular_max_rad_s: float = 0.52
+    velocity_push_linear_max_m_s: float = 0.2
+    velocity_push_angular_max_rad_s: float = 0.2
 
     init_state: DRInitialStateCfg | None = DRInitialStateCfg()
 
@@ -169,7 +169,7 @@ class DomainRandomizationCfg:
     push: DRPushScheduleCfg = DRPushScheduleCfg()
     global_push: DRPushScheduleCfg = DRPushScheduleCfg()
     object_push: DRPushScheduleCfg = DRPushScheduleCfg()
-    velocity_push: DRPushVelocityScheduleCfg = DRPushVelocityScheduleCfg()
+    velocity_push: DRPushScheduleCfg = DRPushScheduleCfg()
 
     # delay: DRScheduleCfg = DRDisabledCfg()
     # ball_mass: DRScheduleCfg = DRDisabledCfg()

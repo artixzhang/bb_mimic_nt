@@ -43,6 +43,7 @@ def test_student_play_randomization_is_off_by_default_and_independently_enabled(
                 enable_rsi=True, randomize_clip=True,
                 reset_dof_pos_noise=0., reset_dof_vel_noise=0.))
             self.student_observation = SimpleNamespace(enable_noise=True, randomize_delay=True)
+            self.student_termination = SimpleNamespace(enabled=True)
             self.dr = configuration_classes['StudentDomainRandomizationCfg']()
 
         def __post_init__(self):
@@ -64,12 +65,13 @@ def test_student_play_randomization_is_off_by_default_and_independently_enabled(
     assert all(getattr(cfg.dr.init_state, name).enabled for name in (
         'dof_pos', 'dof_vel', 'root_pos', 'root_rot', 'root_vel', 'root_ang_vel', 'object_pos'))
     for name in names:
-        assert getattr(cfg.dr, name).enabled is domain_randomization
+        assert getattr(cfg.dr, name).enabled is (domain_randomization and name != 'delay')
         assert getattr(cfg.dr, name).full_strength is domain_randomization
     assert not cfg.commands.motion.enable_rsi
     assert not cfg.commands.motion.randomize_clip
     assert not cfg.student_observation.enable_noise
     assert not cfg.student_observation.randomize_delay
+    assert not cfg.student_termination.enabled
 
 
 def test_student_curricula_reach_full_strength_early_without_changing_teacher(configuration_classes):
@@ -83,7 +85,7 @@ def test_student_curricula_reach_full_strength_early_without_changing_teacher(co
     assert (teacher.delay.start_fraction, teacher.delay.end_fraction) == (.3, .7)
     for name, start, end in [('ball_mass', 50, 250), ('pd_gains', 50, 250),
                              ('hand_friction', 50, 250), ('foot_friction', 50, 250),
-                             ('link_mass', 50, 250), ('delay', 100, 300), ('push', 100, 350),
+                             ('link_mass', 50, 250), ('push', 100, 350),
                              ('global_push', 100, 350), ('object_push', 100, 350),
                              ('velocity_push', 100, 350)]:
         schedule = getattr(student, name)
@@ -91,6 +93,10 @@ def test_student_curricula_reach_full_strength_early_without_changing_teacher(co
         assert events.curriculum_strength(schedule, (start + end) / 2, 1000) == pytest.approx(.5)
         assert events.curriculum_strength(schedule, end, 1000) == 1.
         assert events.curriculum_strength(schedule, 999, 1000) == 1.
+    assert not student.delay.enabled
+    assert student.delay_nominal_steps == 0
+    assert student.delay_max_offset_steps == 2
+    assert events.curriculum_strength(student.delay, 999, 1000) == 0.
 
 
 def test_humanx_initialization_defaults_and_independent_switches(configuration_classes):

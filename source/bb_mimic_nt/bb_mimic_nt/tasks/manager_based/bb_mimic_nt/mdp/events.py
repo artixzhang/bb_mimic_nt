@@ -466,7 +466,8 @@ def advance_push_pulse(env, env_ids: torch.Tensor | None):
         _write_push_wrenches(context, changed_ids)
     velocity = context.velocity_push
     if velocity is not None and velocity.schedule.enabled:
-        due = ~motion.motion_done[ids] & (now + 1.0e-12 >= velocity.next_trigger_s[ids])
+        allowed = ~motion.motion_done[ids] & motion.reference["push_available"][ids]
+        due = allowed & (now + 1.0e-12 >= velocity.next_trigger_s[ids])
         strength = curriculum_strength(velocity.schedule, iteration, env.cfg.dr.total_iterations)
         hit_ids = velocity.draw(ids[due], now, strength)
         if len(hit_ids):

@@ -24,6 +24,9 @@ from bb_mimic_nt.student_deployment import (
 )
 from bb_mimic_nt.policy_contract import build_policy_contract, load_teacher_contract, validate_policy_contract
 
+STUDENT_PPO_CHECKPOINT_FORMAT = "bb_mimic_nt_student_ppo_bc_v1"
+STUDENT_CHECKPOINT_FORMATS = ("bb_mimic_nt_student_dagger_v1", STUDENT_PPO_CHECKPOINT_FORMAT)
+
 
 class StudentYamlLoader(yaml.SafeLoader):
     """Safe loader extended only for tuples emitted by Isaac Lab configuration dumps."""
@@ -74,8 +77,6 @@ def student_apply_teacher_config(env_cfg, checkpoint: Path) -> tuple[dict, dict]
     env_cfg.actions.joint_pos.action_scale_values = list(contract['action_scale'])
     teacher_dr = environment["dr"]
     scalar_names = (
-        "delay_nominal_steps",
-        "delay_max_offset_steps",
         "ball_mass_fraction",
         "pd_gain_fraction",
         "hand_friction_nominal",
@@ -172,7 +173,7 @@ def student_load_teacher(checkpoint: Path, observations, student_cfg, env) -> tu
         STUDENT_ACTION_DIM,
         student_obs_normalization=False,
         teacher_obs_normalization=teacher_normalization,
-        student_hidden_dims=list(student_cfg.policy.student_hidden_dims),
+        student_hidden_dims=student_hidden_dims(student_cfg),
         teacher_hidden_dims=list(policy_cfg["actor_hidden_dims"]),
         activation=policy_cfg["activation"],
         init_noise_std=0.0,
@@ -183,7 +184,18 @@ def student_load_teacher(checkpoint: Path, observations, student_cfg, env) -> tu
         raise RuntimeError("Teacher actor weights were not loaded.")
     model.teacher.eval()
     model.teacher_obs_normalizer.eval()
+    model.teacher.requires_grad_(False)
+    model.teacher_obs_normalizer.requires_grad_(False)
     return model, agent
+
+
+def student_hidden_dims(student_cfg) -> list[int]:
+    """Resolve current PPO actors and archived distillation configurations."""
+    policy = student_cfg.policy
+    dimensions = getattr(policy, "actor_hidden_dims", None)
+    if dimensions is None:
+        dimensions = policy.student_hidden_dims
+    return list(dimensions)
 
 
 def student_metadata(env, student_cfg, teacher_checkpoint: Path | None = None) -> dict:
@@ -220,7 +232,7 @@ def student_metadata(env, student_cfg, teacher_checkpoint: Path | None = None) -
         "pd_stiffness": robot.data.default_joint_stiffness[0, joint_ids].detach().cpu().tolist(),
         "pd_damping": robot.data.default_joint_damping[0, joint_ids].detach().cpu().tolist(),
         "policy_hz": 1.0 / env.step_dt,
-        "student_hidden_dims": list(student_cfg.policy.student_hidden_dims),
+        "student_hidden_dims": student_hidden_dims(student_cfg),
         "activation": student_cfg.policy.activation,
         "observation_settings": inference_observation,
         "training_observation_settings": training_observation,
@@ -243,9 +255,9 @@ def student_metadata(env, student_cfg, teacher_checkpoint: Path | None = None) -
 def student_read_artifact(weights: Path, config: Path | None = None) -> tuple[dict, dict]:
     """Read either a training checkpoint or exported Student weights once on CPU."""
     state = torch.load(weights, map_location="cpu", weights_only=False)
-    if isinstance(state, dict) and state.get("format") == "bb_mimic_nt_student_dagger_v1":
+    if isinstance(state, dict) and state.get("format") in STUDENT_CHECKPOINT_FORMATS:
         if "student" not in state or "metadata" not in state:
-            raise ValueError("Student DAgger checkpoint is missing weights or deployment metadata.")
+            raise ValueError("Student checkpoint is missing weights or deployment metadata.")
         validate_student_metadata(state['metadata'])
         return state["student"], state["metadata"]
     config = config or weights.with_name("student_config.json")
@@ -264,14 +276,14 @@ def student_read_artifact(weights: Path, config: Path | None = None) -> tuple[di
 
 
 def student_validate_resume_observation(previous: dict, current: dict) -> None:
-    """Allow curriculum timing changes while rejecting incompatible replay inputs."""
+    """Allow curriculum timing changes while rejecting incompatible policy inputs."""
     validate_student_metadata(previous)
     validate_student_metadata(current)
     if previous['format'] != STUDENT_TRAINING_FORMAT or current['format'] != STUDENT_TRAINING_FORMAT:
         raise ValueError('Resume requires a direct-action Student training checkpoint.')
     validate_policy_contract(previous['policy_contract'], current['policy_contract'])
     if previous["observation_dim"] != current["observation_dim"]:
-        raise ValueError("Resume history dimension differs; five-frame Student requires a new training run.")
+        raise ValueError("Resume history dimension differs; changed history requires a new training run.")
     if previous.get('command_dimension') != current.get('command_dimension'):
         raise ValueError('Resume skill command dimension differs.')
     previous_skills = previous.get('deployment_contract', {}).get('skills')

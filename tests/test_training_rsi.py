@@ -2,6 +2,7 @@
 
 import ast
 import copy
+import math
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
@@ -125,27 +126,23 @@ def test_actual_dagger_startup_applies_cli_budget_before_environment_creation(it
         teacher_checkpoint=Path("teacher.pt"),
         max_iterations=iterations,
         num_steps_per_env=rollout,
-        replay_capacity=None,
-        replay_recent_sample_fraction=None,
         batch_size=None,
-        updates_per_iteration=None,
+        num_learning_epochs=None,
+        bc_coef=None,
         num_envs=None,
         seed=None,
     )
     scope = dict(
         args=args,
-        student_apply_teacher_config=lambda *args: None,
+        student_apply_teacher_config=lambda *args: ({}, {}),
         configure_training_curricula=configure_training_curricula,
+        math=math,
     )
     exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), str(source), "exec"), scope)
     agent = SimpleNamespace(
         max_iterations=1000,
         num_steps_per_env=48,
-        replay_capacity=100,
-        replay_recent_storage_fraction=0.5,
-        replay_recent_sample_fraction=0.75,
-        batch_size=10,
-        updates_per_iteration=1,
+        algorithm=SimpleNamespace(batch_size=10, num_learning_epochs=5, bc_coef=1.0),
     )
     cfg = scope["startup"](environment_config(), agent)
     assert cfg.commands.motion.rsi_decay_steps == int(iterations * rollout * RSI_DECAY_FRACTION)

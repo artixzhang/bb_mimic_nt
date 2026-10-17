@@ -6,6 +6,8 @@ PYTHONPATH=source/bb_mimic_nt python scripts/rsl_rl/export_student.py
 
 默认选择最新有非空 checkpoint 的时间戳 run，再选择编号最大的 `model_N.pt`，导出到 `outputs/student_<run-time>`。可用 `--checkpoint`、`--student-weights`、`--student-config`、`--output` 覆盖。自动训练导出与独立导出使用同一逻辑。
 
+新训练使用 PPO + BC，目录为 `logs/rsl_rl/g1_shoot_student_ppo_bc_v1`。训练 rollout 从 Student 高斯分布采样，但导出只保存 actor 的确定性均值，不包含 critic、Teacher、采样噪声或优化器。训练的完整 checkpoint 顶层格式为 `bb_mimic_nt_student_ppo_bc_v1`；下述 metadata 和部署接口版本与它分别管理。
+
 ## 交付文件
 
 真机部署只需要同一次导出的 **student_policy.onnx + student_config.json**。JSON 不再导出 motion profiles、profile IDs、各 clip 的 root/ball/hoop 状态、参考时长或轨迹路径。部署不需要 Teacher、reference motion、skills.yaml 或 manifest。
@@ -21,6 +23,8 @@ PYTHONPATH=source/bb_mimic_nt python scripts/rsl_rl/export_student.py
 `export_source` 记录导出输入文件的 path、file、size_bytes、sha256，以及 checkpoint 的 iteration。路径只用于追溯，部署无需访问它。Teacher、motion 和 URDF 哈希保存在 manifest.provenance。
 
 从 checkpoint 导出时，仅从其归档元数据读取技能、机器人参数和启动关节角；不打开轨迹文件，也不读取当前 skills.yaml。当前训练元数据版本为 `bb_mimic_nt_student_training_v4`，部署配置版本为 `bb_mimic_nt_student_deployment_v4`，动作语义为 `direct_joint_position_v1`。旧 residual Teacher、旧 nominal-offset Student 和无版本导出包均不兼容，不能通过修改 JSON 转换，需重新训练。
+
+已有 direct-action DAgger checkpoint 和部署包仍支持播放、评估和重新导出；按其中归档的 history_length 构造网络。旧 DAgger 权重不能恢复为新的 PPO+BC 训练，后者需从头训练；`--resume-checkpoint` 只接受兼容的 PPO+BC checkpoint。
 
 ## 默认技能和启动姿态
 
@@ -60,7 +64,7 @@ PYTHONPATH=source/bb_mimic_nt python scripts/rsl_rl/export_student.py \
 | previous_action_history | 29 | 上一个策略 tick 输出经 clip 后的请求 action，无量纲，取执行延迟之前的值 |
 | hoop_pos_cyl | 3 | 外部篮筐参数 `[r, theta, z]`，单位 `[m, rad, m]` |
 
-历史按 field-major 拼接：先拼完一种观测的所有帧，再拼下一种。每种历史为 oldest-to-newest，每帧按 xyz 或 joint_names 顺序。输入维数为 `93 * history_length + 3 + command_dimension`；5 帧历史、3 维 command 时为 471。输入没有 phase、参考帧或时间进度。
+历史按 field-major 拼接：先拼完一种观测的所有帧，再拼下一种。每种历史为 oldest-to-newest，每帧按 xyz 或 joint_names 顺序。输入维数为 `93 * history_length + 3 + command_dimension`；新训练默认 10 帧历史、3 维 command，即 936 维，100 Hz 下覆盖最近 90 ms。旧 5 帧模型仍为 471 维，部署必须读取导出配置，不能硬编码新默认维数。输入没有 phase、参考帧或时间进度。
 
 每个策略 tick 使用当前传感器采样更新历史，最新一帧参与本次推理。部署配置不包含传感器或动作的人工延迟字段。
 
@@ -129,7 +133,7 @@ for tick in range(num_ticks):
 
 接口允许持续切换，但训练仍按 episode 固定 command 和 hoop，hold/shoot 切换后的状态分布和连续执行表现仍需单独验证。
 
-部署观测构建器和导出策略的仿真播放均不添加人工延迟，训练中的传感器噪声与延迟随机化仍保留。
+部署观测构建器和导出策略的仿真播放均不添加人工延迟。新 Student 训练默认也使用零动作延迟和零观测延迟；传感器噪声仍按课程启用，延迟随机化保留为需要显式开启的训练选项。历史窗口不会把最新传感器帧后移。
 
 ## 验收
 
@@ -141,3 +145,15 @@ python scripts/verify_student_bundle.py /path/to/new/student_bundle --backend on
 ```
 
 仿真播放需要参考轨迹，由本地环境的 skills_config 或 skills_path 提供；技能名和 command ID 必须与导出包匹配。仿真使用这些本地轨迹进行 reset 和评估，不把这些需求带入真机配置。
+
+网络数值一致性不能替代闭环验证。可在同一技能的相同 clips 上比较 Teacher 和 Student：
+
+```bash
+python scripts/rsl_rl/evaluate_student.py \
+  --mode closed-loop --skill shoot --end-hold-s 5 \
+  --teacher-checkpoint /path/to/teacher_model.pt \
+  --student-weights /path/to/student_bundle/student_weights.pt \
+  --output outputs/student_closed_loop_shoot.json --headless
+```
+
+闭环模式要求显式 `--skill`；分别验证 hold、shoot、stand_to_hold。默认末帧保持 5 秒并强制每个 episode 执行该保持，关闭 DR、RSI、初态噪声和 termination curriculum，使用原始终止阈值及确定性动作。输出完整完成率、归一化存活比例、失败率、实际时长和终止原因；每个并行环境只统计首次 episode，终止状态在自动 reset 前捕获。默认 `--mode flight` 仍输出球最高高度及首次触地落点，它关闭提前终止，不能用于判断闭环完成率。

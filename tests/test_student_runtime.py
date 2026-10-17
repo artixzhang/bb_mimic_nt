@@ -14,7 +14,7 @@ from bb_mimic_nt.student_runtime import (
 )
 
 
-@pytest.mark.parametrize('history', [3, 5])
+@pytest.mark.parametrize('history', [3, 5, 10])
 @pytest.mark.parametrize('stale_source', [False, True])
 def test_student_deployment_and_torchscript_roundtrip(tmp_path, history, stale_source, monkeypatch):
     metadata = direct_student_metadata(history=history, nominal=0.)
@@ -159,10 +159,13 @@ def test_teacher_loading_preserves_student_curriculum_and_play_flags(
         name: SimpleNamespace(**dict(component, enabled=True)) for name, component in init_components.items()})
     # A destination's independently disabled component must stay disabled, too.
     cfg.dr.init_state.root_vel.enabled = False
+    cfg.dr.delay_nominal_steps = 1
+    cfg.dr.delay_max_offset_steps = 4
     archived_before = copy.deepcopy(environment)
     runtime.student_apply_teacher_config(cfg, None)
     assert cfg.dr.push_force_max_n == (20., 20., 8.)
-    assert cfg.dr.delay_nominal_steps == 0
+    assert cfg.dr.delay_nominal_steps == 1
+    assert cfg.dr.delay_max_offset_steps == 4
     assert cfg.commands.motion.skills_config == motion['skills_config']
     assert cfg.commands.motion.enable_rsi == enabled
     for name in names:
@@ -225,3 +228,18 @@ def test_resume_rejects_same_size_action_coordinate_change():
     current['policy_contract']['action_scale'][0] *= 2
     with pytest.raises(ValueError, match='action_scale'):
         student_validate_resume_observation(previous, current)
+
+
+@pytest.mark.parametrize('checkpoint_format,history', [
+    ('bb_mimic_nt_student_dagger_v1', 5), ('bb_mimic_nt_student_ppo_bc_v1', 10),
+])
+def test_training_artifacts_use_their_own_history_and_actor_weights(tmp_path, checkpoint_format, history):
+    metadata = direct_student_metadata(history=history)
+    policy = StudentPolicy(metadata['student_hidden_dims'], metadata['activation'], metadata['observation_dim'])
+    path = tmp_path / 'model_50.pt'
+    torch.save(dict(format=checkpoint_format, student=policy.student.state_dict(), metadata=metadata,
+                    next_iteration=50), path)
+    restored, saved = student_load_policy(path, None, 'cpu')
+    inputs = torch.randn(2, metadata['observation_dim'])
+    torch.testing.assert_close(restored(inputs), policy(inputs))
+    assert saved['history_length'] == history

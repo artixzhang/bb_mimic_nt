@@ -398,6 +398,19 @@ class MotionReferenceCommand(CommandTerm):
             env_ids = torch.arange(self.num_envs, device=self.device)
         elif not isinstance(env_ids, torch.Tensor):
             env_ids = torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
+        student_curriculum = None
+        if getattr(getattr(self._env, "cfg", None), "student_termination", None) is not None:
+            from bb_mimic_nt.student_curriculum import get_student_termination_curriculum
+
+            student_curriculum = get_student_termination_curriculum(self._env, self)
+            # Command reset precedes TerminationManager.reset and counter clearing.
+            # Capture the old skill/horizon, only on actual nonempty terminal resets.
+            terminal = self._env.termination_manager
+            terminal_ids = env_ids[terminal.dones[env_ids] & (self._env.episode_length_buf[env_ids] > 0)]
+            student_curriculum.finish_episodes(
+                terminal_ids, self._env.episode_length_buf[terminal_ids], terminal.terminated[terminal_ids],
+                {name: terminal.get_term(name)[terminal_ids] for name in terminal.active_terms},
+            )
         extras = self._collect_episode_metrics(env_ids)
 
         if self.cfg.randomize_clip:
@@ -426,6 +439,12 @@ class MotionReferenceCommand(CommandTerm):
         triggered = torch.rand(len(env_ids), device=self.device) < probability
         self.end_hold_triggered[env_ids] = triggered
         self.end_hold_duration[env_ids] *= triggered.float()
+        if student_curriculum is not None:
+            # Fixed 1x Student motion: normalize RSI and variable end holds by
+            # the reference time remaining at this episode's sampled start.
+            remaining = (valid_frame_count - 1 - self.frame[env_ids]).clamp_min(0) / self.fps
+            planned_steps = (remaining + self.end_hold_duration[env_ids]) / self._env.step_dt
+            student_curriculum.begin_episode(env_ids, self.skill_ids[env_ids], planned_steps)
         at_end = self.frame[env_ids] >= valid_frame_count - 1
         final_stage = torch.where(self.end_hold_duration[env_ids] > 0, STAGE_END_HOLD, STAGE_DONE)
         self.stage[env_ids] = torch.where(at_end, final_stage, STAGE_ACTIVE)

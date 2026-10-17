@@ -106,16 +106,22 @@ def test_gate_waits_for_one_opportunity_and_reschedules_from_actual_trigger():
     ctx.motion.reference['push_available'][:] = False
     ctx.motion.reference['obj_push'][:] = False
     advance(env, 50)
-    assert ctx.robot.force.any() and ctx.robot.velocity_writes == 1
+    assert ctx.robot.force.any() and ctx.robot.velocity_writes == 0
+    assert ctx.velocity_push.next_trigger_s.eq(.5).all()
     assert ctx.pushes['push'].next_trigger_s.eq(.5).all()
     advance(env, 150)
     assert ctx.pushes['push'].next_trigger_s.eq(.5).all()
+    assert ctx.robot.velocity_writes == 0
+    assert ctx.velocity_push.next_trigger_s.eq(.5).all()
     events.arm_push(env, torch.arange(env.num_envs))
     assert ctx.pushes['push'].next_trigger_s.eq(.5).all()
     assert ctx.pushes['object_push'].next_trigger_s.eq(.5).all()
+    assert ctx.velocity_push.next_trigger_s.eq(.5).all()
     ctx.motion.reference['push_available'][:] = True
     advance(env, 151)
     assert ctx.pushes['push'].applied.all()
+    assert ctx.robot.velocity_writes == 1
+    torch.testing.assert_close(ctx.velocity_push.next_trigger_s, torch.full((3,), 2.01, dtype=torch.float64))
     torch.testing.assert_close(ctx.pushes['push'].next_trigger_s, torch.full((3,), 2.01, dtype=torch.float64))
     assert ctx.pushes['object_push'].next_trigger_s.eq(.5).all()
 
@@ -259,7 +265,6 @@ def test_velocity_push_adds_world_root_link_velocities_without_touching_forces()
     env, ctx = setup_pushes(10000)
     for pulse in ctx.pushes.values():
         pulse.schedule.enabled = False
-    ctx.motion.reference['push_available'][:] = False
     ctx.motion.reference['obj_push'][:] = False
     before = ctx.robot.data.root_link_vel_w.clone()
     advance(env, 50)
@@ -271,9 +276,12 @@ def test_velocity_push_adds_world_root_link_velocities_without_touching_forces()
     assert (delta.mean(0).abs() < .02).all()
     assert not ctx.robot.force.any() and not ctx.ball.force.any()
     before = ctx.robot.data.root_link_vel_w.clone()
+    ctx.motion.reference['push_available'][3] = False
     advance(env, 100, torch.tensor([1, 3]))
     assert torch.equal(before[0], ctx.robot.data.root_link_vel_w[0])
     assert not torch.equal(before[1], ctx.robot.data.root_link_vel_w[1])
+    assert torch.equal(before[3], ctx.robot.data.root_link_vel_w[3])
+    assert ctx.velocity_push.next_trigger_s[3] == 1.
 
 
 def test_trigger_uses_current_curriculum_for_force_and_velocity():

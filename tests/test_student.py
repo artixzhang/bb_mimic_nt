@@ -1,4 +1,4 @@
-"""CPU contracts for Student targets, observation history, DAgger mixing, and replay."""
+"""CPU contracts for Student targets, observation history, and observation delays."""
 
 from __future__ import annotations
 
@@ -13,17 +13,14 @@ from bb_mimic_nt.action_math import clip_joint_actions
 from bb_mimic_nt.student import (
     STUDENT_OBSERVATION_DIM,
     STUDENT_OBSERVATION_FIELDS,
-    StudentReplay,
-    student_execution_probability,
     student_history,
     student_delay_bounds,
-    student_mix_actions,
 )
 
 
 def test_student_contract_and_teacher_labels_use_dimensionless_requests() -> None:
-    assert sum(size for _, size in STUDENT_OBSERVATION_FIELDS) == STUDENT_OBSERVATION_DIM == 471
-    assert STUDENT_OBSERVATION_FIELDS[-2] == ('previous_action_history', 145)
+    assert sum(size for _, size in STUDENT_OBSERVATION_FIELDS) == STUDENT_OBSERVATION_DIM == 936
+    assert STUDENT_OBSERVATION_FIELDS[-2] == ('previous_action_history', 290)
     raw = torch.tensor([[-300.0, .3, 150.0]])
     label = clip_joint_actions(raw)
     torch.testing.assert_close(label, torch.tensor([[-100.0, .3, 100.0]]))
@@ -34,7 +31,7 @@ def test_student_history_is_per_environment_and_oldest_first() -> None:
     history = torch.arange(7 * 2, dtype=torch.float32).reshape(7, 2, 1)
     cursor = torch.tensor([5, 2])
     delay = torch.tensor([0, 2])
-    selected = student_history(history, cursor, delay)
+    selected = student_history(history, cursor, delay, length=5)
     assert selected[:, :, 0].tolist() == [[2.0, 4.0, 6.0, 8.0, 10.0], [7.0, 9.0, 11.0, 13.0, 1.0]]
 
 
@@ -53,42 +50,6 @@ def test_student_delay_rejects_invalid_configuration(bounds) -> None:
         student_delay_bounds(*bounds)
 
 
-def test_replay_reservoir_updates_original_storage_and_last_duplicate_wins(monkeypatch) -> None:
-    replay = StudentReplay(8, observation_dim=1, action_dim=1)
-    initial = torch.arange(4.).reshape(-1, 1)
-    replay.add(initial, initial + 100)
-    monkeypatch.setattr(torch, "rand", lambda count, **kwargs: torch.tensor([0., .1, .9, 0., .99, .99]))
-    incoming = torch.arange(10., 16.).reshape(-1, 1)
-    replay.add(incoming, incoming + 100)
-    # Destinations are 0, 0, 6, 0, 8, 9: the last accepted write replaces slot 0.
-    assert replay.observations[:, 0].tolist() == [13., 1., 2., 3.]
-    assert replay.labels[:, 0].tolist() == [113., 101., 102., 103.]
-    assert replay.recent_observations[:, 0].tolist() == [12., 13., 14., 15.]
-    assert replay.seen == 10
-
-
-def test_replay_history_is_not_frozen_after_initial_fill() -> None:
-    replay = StudentReplay(8, observation_dim=1, action_dim=1)
-    initial = torch.arange(4.).reshape(-1, 1)
-    replay.add(initial, initial)
-    torch.manual_seed(0)
-    replay.add(torch.full((1000, 1), 99.), torch.full((1000, 1), 99.))
-    assert torch.all(replay.observations == 99.)
-    assert torch.all(replay.labels == 99.)
-
-
-def test_student_execution_schedule_and_policy_mix() -> None:
-    assert student_execution_probability(0, 100) == 0.0
-    assert student_execution_probability(20, 100) == 0.0
-    assert student_execution_probability(35, 100) == pytest.approx(0.5)
-    assert student_execution_probability(50, 100) == 1.0
-    teacher, student = torch.ones(4, 29), torch.zeros(4, 29)
-    mixed, mask = student_mix_actions(teacher, student, 0.0)
-    assert not mask.any() and torch.equal(mixed, teacher)
-    mixed, mask = student_mix_actions(teacher, student, 1.0)
-    assert mask.all() and torch.equal(mixed, student)
-
-
 def test_student_uses_full_physical_dr_from_first_iteration() -> None:
     path = (
         Path(__file__).resolve().parents[1]
@@ -103,23 +64,3 @@ def test_student_uses_full_physical_dr_from_first_iteration() -> None:
     assert [module.curriculum_strength(schedule, step, 100) for step in (0, 20, 40, 60)] == pytest.approx(
         [0.0, 0.0, 0.5, 1.0]
     )
-
-
-def test_student_replay_is_bounded_and_restorable() -> None:
-    torch.manual_seed(3)
-    replay = StudentReplay(7, observation_dim=2, action_dim=1)
-    observations = torch.arange(50.0).reshape(25, 2)
-    labels = torch.arange(25.0).reshape(25, 1)
-    replay.add(observations, labels)
-    assert replay.size == 7 and replay.seen == 25
-    assert replay.recent_size == replay.recent_capacity == 4
-    sampled_observation, sampled_label = replay.sample(20)
-    torch.testing.assert_close(sampled_observation[:, 0] / 2, sampled_label[:, 0])
-    recent_observation, recent_label = replay.sample_recent(20)
-    torch.testing.assert_close(recent_observation[:, 0] / 2, recent_label[:, 0])
-    assert set(recent_label[:, 0].tolist()).issubset({21.0, 22.0, 23.0, 24.0})
-    restored = StudentReplay(7, observation_dim=2, action_dim=1)
-    restored.load_state_dict(replay.state_dict())
-    torch.testing.assert_close(restored.observations, replay.observations)
-    torch.testing.assert_close(restored.recent_observations, replay.recent_observations)
-    assert restored.seen == 25

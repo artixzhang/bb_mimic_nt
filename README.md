@@ -1,13 +1,13 @@
 # BB Mimic NT：Unitree G1 跳跃投篮 Teacher 与 Student
 
-本项目在 Isaac Lab 2.3 / Isaac Sim 5.1 中实现 G1–篮球–篮筐的 manager-based PPO 模仿环境，以及独立的 Student DAgger 蒸馏、评估和部署导出流程。Teacher 按 `skills.yaml` 的 episode 权重混合训练多个独立技能；Student 只拟合冻结 Teacher，不包含 task reward 或后续 finetune。
+本项目在 Isaac Lab 2.3 / Isaac Sim 5.1 中实现 G1–篮球–篮筐的 manager-based PPO 模仿环境，以及独立的 Student PPO + BC 训练、评估和部署导出流程。Teacher 按 `skills.yaml` 的 episode 权重混合训练多个独立技能；Student 使用受限部署观测，同时优化任务奖励和冻结 Teacher 的动作监督。
 
 ## 环境与数据
 
 - 训练环境：`BbMimicNT-G1-Shoot-v0`
 - 确定性播放环境：`BbMimicNT-G1-Shoot-Play-v0`
 - 仿真 / 策略频率：200 Hz / 100 Hz（decimation 2）
-- 动作：Teacher/Student 共用 29 维无量纲 direct action；输出 clip 到 ±100，目标为 `nominal + action × (0.25 × effort_limit / Kp)`，不做目标角度裁剪，再按每环境 0–2 个策略步延迟执行。scale 使用固定标称参数，详见 [动作接口](source/bb_mimic_nt/docs/actions.md)
+- 动作：Teacher/Student 共用 29 维无量纲 direct action；输出 clip 到 ±100，目标为 `nominal + action × (0.25 × effort_limit / Kp)`，不做目标角度裁剪。Teacher 的动作 DR 可采样 0–2 个策略步延迟，Student 默认关闭人工延迟。scale 使用固定标称参数，详见 [动作接口](source/bb_mimic_nt/docs/actions.md)
 - Teacher observation：默认 676 维（`673 + command.dimension`），包含当前状态、reference pose/velocity/contact、object-control state、历史、技能 one-hot command、reference speed 和 6 维 DR 特权参数
 - 技能配置：`source/bb_mimic_nt/assets/trajectory/skills.yaml`
 - 原始轨迹：各技能的 `motion_file`；每个文件对应一个同目录 `*_processed.pt` 缓存（自动生成并被 Git 忽略）
@@ -37,7 +37,7 @@ python scripts/preprocess_trajectory.py \
 
 ## 训练
 
-默认使用 8192 个环境、每次 rollout 48 步、7000 次 PPO iteration。Teacher 和 Student 的默认环境数统一由 `source/bb_mimic_nt/bb_mimic_nt/training.py` 中的 `NUM_ENVS` 控制（多 GPU 时为每个进程的环境数）；`PPO_STEPS_PER_ENV` 控制 Teacher rollout，Student 的 `DAGGER_STEPS_PER_ENV` 默认跟随它。Teacher/Student 共用 `RSI_INITIAL_PROBABILITY=0.3` 和 `RSI_DECAY_FRACTION=0.15`，RSI 从训练开始线性衰减，在各自预算的前 15% 完全退出；Teacher 默认退出期限为 50400 策略步（1050 轮）。命令行和 Hydra 参数仍可覆盖默认配置。
+默认使用 8192 个环境、每次 rollout 48 步、8000 次 Teacher PPO iteration。Teacher 和 Student 的默认环境数统一由 `source/bb_mimic_nt/bb_mimic_nt/training.py` 中的 `NUM_ENVS` 控制（多 GPU 时为每个进程的环境数）；`PPO_STEPS_PER_ENV` 控制 Teacher rollout，Student 的 `STUDENT_STEPS_PER_ENV` 默认跟随它。Teacher/Student 共用 `RSI_INITIAL_PROBABILITY=0.3` 和 `RSI_DECAY_FRACTION=0.15`，RSI 从训练开始线性衰减，在各自预算的前 15% 完全退出；Teacher 默认退出期限为 57600 策略步（1200 轮）。命令行和 Hydra 参数仍可覆盖默认配置。
 
 ```bash
 python scripts/rsl_rl/train.py \
@@ -94,7 +94,7 @@ PPO 每轮 iteration 先收集 `NUM_ENVS * num_steps_per_env` 条 transition，�
 
 `end.object_interaction_enabled` 默认 false；设为 true 时末帧保持期间继续训练物体交互，但仍受技能全局开关约束。当前 hold 在保持期间开启交互；shoot 在结束后关闭；stand_to_hold 整个 episode 关闭。
 
-奖励参数在 `mdp/rewards.py` 的 `UnifiedRewardCfg`。自由球时的 object 和 relative 权重分别由 `object_free_weight`（默认 1.0）和 `relative_free_weight`（默认 0.3）控制，仍保留原有 `release` 数据语义。Student DAgger 只拟合冻结 Teacher，不包含 task reward；它使用同一技能采样、RSI 和保持逻辑。
+奖励参数在 `mdp/rewards.py` 的 `UnifiedRewardCfg`。自由球时的 object 和 relative 权重分别由 `object_free_weight`（默认 1.0）和 `relative_free_weight`（默认 0.3）控制，仍保留原有 `release` 数据语义。Student PPO + BC 使用同一任务奖励、技能采样、RSI 和保持逻辑，并加入冻结 Teacher 的动作监督。
 
 动作和观测语义已升级为 direct action，旧 Teacher/Student checkpoint 需要重新训练。技能配置、ID 映射和 motion profile 随训练归档和 Student 导出保存，Student 蒸馏继承所选 Teacher 的配置。
 
@@ -115,7 +115,7 @@ PPO 每轮 iteration 先收集 `NUM_ENVS * num_steps_per_env` 条 transition，�
 
 动作延迟由 `dr.delay_nominal_steps`（默认 0）和 `dr.delay_max_offset_steps`（默认 2）控制。每次 reset 先在完整范围 `[max(0, nominal-offset), nominal+offset]` 均匀采样整数 `D`，再计算 `x = nominal + strength * (D - nominal)`，以 `x` 的小数部分为概率向上取整，否则向下取整。强度为 0 时全部为 nominal，为 1 时完整范围均匀分布，中间各档延迟的概率连续变化。例如默认范围在强度 0.1 时，约 90% 为 0 步、10% 为 1 步；不会在整数半径阈值处突然引入大批延迟样本。
 
-动作 delay 的 Teacher 课程仍为 30%–70%，Student 为 10%–30%。Student 观测 delay 使用相同采样算法，保留独立的 0%–20% 课程、nominal=1 和完整范围 0–3 步。每个 episode 内 delay 不变。动作延迟特权观测仍为 `(steps-nominal)/max(offset, 1)`；关闭随机化时固定 nominal。要配置标称 1、完整范围 0–2 步，设动作 delay 参数为 `1, 1`；固定零延迟设为 `0, 0`。
+动作 delay 的 Teacher 课程仍为 30%–70%；Student 默认关闭该 DR，显式开启后课程为 10%–30%。Student 观测 delay 默认 nominal=0、randomize_delay=False，保留可选完整范围 0–3 步及 0%–20% 课程，显式开启后使用相同采样算法。每个 episode 内 delay 不变。动作延迟特权观测仍为 `(steps-nominal)/max(offset, 1)`；关闭随机化时固定 nominal。要配置标称 1、完整范围 0–2 步，设动作 delay 参数为 `1, 1`；固定零延迟设为 `0, 0`。
 
 ### 循环 Push
 
@@ -126,7 +126,7 @@ PPO 每轮 iteration 先收集 `NUM_ENVS * num_steps_per_env` 条 transition，�
 | `push` | 逐帧 `push_available` | 0.8 | XYZ 力幅值 0–70 / 0–70 / 0–50 N；各轴力矩 ±5 Nm；0.1 s |
 | `global_push` | 无轨迹门控 | 0.8 | 各轴力幅值 0–10 N；各轴力矩 ±2 Nm；0.3 s |
 | `object_push` | 逐帧 `obj_push` | 0.6 | 各轴力幅值 0–3 N；无力矩；0.1 s |
-| `velocity_push` | 无轨迹门控 | 1.0 | 各轴线速度增量 ±0.5 m/s、角速度增量 ±0.52 rad/s；瞬时叠加 |
+| `velocity_push` | `push_available` 为 true | 1.0 | 各轴线速度增量 ±0.5 m/s、角速度增量 ±0.52 rad/s；瞬时叠加 |
 
 力的符号按轴随机。门控关闭时，已到期的机会等待重新允许，不累计补发；门控允许后独立抽取一次概率，未命中也重采样间隔。末帧保持沿用末帧门控。门控关闭、开关禁用或进入 DONE 时立即清除对应的活动脉冲，保留计时。间隔是机会间隔，实际 Push 次数受概率、门控和课程强度影响；短 episode 连续 reset 不会推迟已采样的触发时间。
 
@@ -221,73 +221,72 @@ python scripts/rsl_rl/evaluate_shooting.py \
 PYTHONPATH=source/bb_mimic_nt pytest -q tests
 ```
 
-## Student DAgger
+## Student PPO + BC
 
-Student 训练和播放任务分别为 `BbMimicNT-G1-Shoot-Student-DAgger-v0` 与 `BbMimicNT-G1-Shoot-Student-Play-v0`。Teacher 使用默认 676 维无噪声、无观测延迟输入；Student 默认使用 471 维显式缩放输入：技能 one-hot command、五帧重力投影、pelvis 角速度、nominal-relative 关节位置、关节速度、裁剪后且执行延迟前的无量纲请求动作，以及 reset 时固定的轨迹篮筐柱坐标 `hoop_pos_cyl`（`[r, theta, z]`）。机器人传感量训练时加入可调高斯噪声与每回合采样一次的 0–3 步延迟，推理固定为标称 1 步。`student_observation.history_length=5` 在 100 Hz 下覆盖 40 ms，输入维度为 `93 * history_length + 3 + command.dimension`。历史、导出和网络输入维度共用这一配置。
+`train_dagger.py` 和注册任务 `BbMimicNT-G1-Shoot-Student-DAgger-v0` 保留名称，训练算法改为 **PPO + 冻结 Teacher 的动作 MSE**。每个 rollout 都由 Student 的高斯策略采样动作执行；Teacher 只为同一状态提供确定性、裁剪后的 action label。没有 Teacher 接管、动作混合或跨轮 replay。Student critic 使用训练时可用的 Teacher 观测，并从 Teacher critic 及其 normalization 初始化；部署只保留 Student actor 的确定性均值。
 
-Student 输出与 Teacher 相同的 29 维无量纲动作，经共享 clip/scale/nominal 映射形成 PD target。它与 Teacher 共用 PD 参数、动作执行延迟以及全部动力学/外力 DR；动作延迟参数从 Teacher checkpoint 对应的环境配置读取，新默认为标称 0、采样 0–2 步，已有 checkpoint 保留原配置。Student 观测延迟由 `student_observation.delay_nominal_steps=1`、`delay_min_steps=0`、`delay_max_steps=3` 独立控制；只把标称改为 0 时，完整采样范围仍是 0–3 步，推理固定 0 步。三个值须满足 `0 <= min <= nominal <= max`；固定零延迟设为 `0, 0, 0`。观测噪声和延迟范围在前 20% 训练内按 smoothstep 增强，初始延迟固定在标称值；设置 `student_observation.full_strength=True` 可直接使用完整观测扰动。Student 使用独立的 `StudentDomainRandomizationCfg` 控制课程，Teacher checkpoint 只同步扰动范围，不覆盖课程及播放开关，设置对应 `dr.<项>.full_strength=True` 可使用完整范围，reference 始终以 1× 推进。DAgger 在前 10% 完全由 Teacher 执行，10%–30% 通过 smoothstep 概率逐环境混合，从 30% 起完全由 Student 执行；所有访问状态始终由冻结 Teacher 标注。
+Student 保持部署观测限制，不加入球状态或 reference phase。默认输入为 **936 维**：技能 one-hot command、十帧重力投影、pelvis 角速度、nominal-relative 关节位置、关节速度、裁剪后且执行延迟前的请求动作，以及 reset 时固定的轨迹篮筐柱坐标 `hoop_pos_cyl`（`[r, theta, z]`）。输入维度为 `93 * history_length + 3 + command.dimension`；默认 `history_length=10`、command 维度 3，100 Hz 下从最老到最新帧覆盖 90 ms。Teacher 仍使用原来的 676 维输入和五帧历史。增加 Student 历史不改变部署可用的传感量。
 
-默认训练 1000 轮，Student 课程按本次总迭代数计算，可在 `bb_mimic_nt_student_env_cfg.py` 独立调整：
+Student 输出与 Teacher 相同的 29 维无量纲动作，经共享 clip/scale/nominal 映射形成 PD target。默认 **动作延迟和观测延迟均为零**：动作 DR 开关 `env.dr.delay.enabled=False`，Student 观测 `delay_nominal_steps=0`、`randomize_delay=False`。保留可选延迟实现及范围，显式开启 `env.dr.delay.enabled=True` 或 `env.student_observation.randomize_delay=True` 才启用相应随机延迟。加载 Teacher 时不会覆盖 Student 的标称延迟；物理 DR 范围和 PD/action 契约仍继承 Teacher。导出和播放不加入人工延迟。
 
-| 项目 | 开始扩展 | 达到完整范围 | 默认迭代数 |
-| --- | ---: | ---: | ---: |
-| RSI（从 0.3 线性衰减） | 0% | 15%（完全退出） | 0–150 |
-| 观测噪声 / 观测延迟 | 0% | 20% | 0–200 |
-| 质量 / PD / 摩擦 DR | 5% | 25% | 50–250 |
-| 动作执行延迟 | 10% | 30% | 100–300 |
-| Push | 10% | 35% | 100–350 |
-| Student 接管概率 | 10% | 30%（完全接管） | 100–300 |
+默认每轮收集 `8192 * 48 = 393216` 个状态，以 `batch_size=8192` 完整遍历当前 rollout **5 个 epochs，共 240 次优化**。每个 epoch 重新洗牌，尾批也参与训练。总损失包括 PPO clipped surrogate、value loss、entropy 和 `bc_coef * MSE(student_mean, teacher_action)`，默认 `bc_coef=1`、初始 std 0.8、entropy 系数 0.01；奖励使用与 Teacher 同一套 `UnifiedMimicReward`，球飞行统计返回零奖励并继续执行。Student actor 不使用 running normalization。
 
-Student RSI 退出期限按实际 `--max-iterations * --num-steps-per-env * RSI_DECAY_FRACTION` 计算，初始概率默认跟随 `training.py` 的 `RSI_INITIAL_PROBABILITY`，可通过 `env.commands.motion.rsi_initial_probability` 覆盖。`--resume-checkpoint` 从保存的 iteration 接续；Student 的 `--max-iterations` 表示目标总轮数，RSI 不从零重新开始。`Curriculum/rsi/probability` 记录实际概率，播放仍关闭 RSI。
+Actor（含可学习的动作 std）和 Critic 分别使用独立 Adam，并分别裁剪梯度，避免 Critic 梯度大小直接改变 Actor 的裁剪系数。`agent.algorithm.actor_learning_rate` / `critic_learning_rate` 与 `actor_max_grad_norm` / `critic_max_grad_norm` 默认均为 `null`，分别回退到现有 `learning_rate=3e-4` 和 `max_grad_norm=1.0`；原有 Hydra 覆盖仍对两边生效，也可分别设置。两边使用同一 Actor KL 信号，分别调整各自当前学习率；BC、奖励、DR 和 std 配置保持原值。
 
-350 轮后，Student 独立执行且全部扰动达到完整范围，剩余约 650 轮用于完整扰动训练。`--max-iterations` 会按比例缩放这些时间点；Teacher 的训练课程保持原配置。播放关闭随机化的设置也不会被加载 Teacher 配置重新开启。
+TensorBoard 的 `StudentPPO/actor_grad_norm`、`StudentPPO/critic_grad_norm` 记录各侧裁剪前梯度范数，`StudentPPO/actor_clip_fraction`、`StudentPPO/critic_clip_fraction` 记录发生裁剪的优化步比例；`Loss/actor_learning_rate`、`Loss/critic_learning_rate` 分别记录两侧学习率。
 
 ```bash
 python scripts/rsl_rl/train_dagger.py \
   --teacher-checkpoint logs/rsl_rl/g1_shoot_teacher_v4/<run>/model_4999.pt \
+  --num-learning-epochs 5 --batch-size 8192 --bc-coef 1.0 \
   --headless
 ```
 
-Teacher 的网络结构、动作契约与逐关节缩放、DR 范围、技能配置与参考轨迹、末帧保持和初态随机化配置从所选 checkpoint 的 `params/` 读取。Student 使用逐技能 RSI 开关，关闭自适应速度。训练前即写出 `params/env.yaml`、`params/agent.yaml` 和 `params/student_config.json`；每个 `model_*.pt` 都包含独立导出所需的模型结构与部署 metadata。默认每轮收集 48 步并更新 32 次，batch size 跟随 `NUM_ENVS`（当前 8192）；回放容量由 `training.py` 按 `2 * NUM_ENVS * max(32, DAGGER_STEPS_PER_ENV)` 推导，当前为 786432，一半保存最新 FIFO 状态、一半作为会持续更新的全历史 reservoir。8192 个环境时 recent 可容纳完整 48 步；471 维输入加 29 维标签时两分区合计约占 1.57 GB（1.46 GiB）显存，每个 batch 默认 75% 采样最新状态，保留最新闭环状态与历史覆盖。这些是默认配置的联动计算；若通过 CLI/Hydra 单独覆盖环境数或 rollout，请相应检查 `--replay-capacity` 和 `--batch-size`。回放数据常驻训练 device，避免 rollout 期间 CPU/GPU 往返；如需在恢复训练时连同回放集恢复，可添加 `--save-replay`。
+默认目标为 1000 轮。`--num-envs`、`--num-steps-per-env`、`--batch-size` 和 `--num-learning-epochs` 决定每轮实际优化次数：`epochs * ceil(num_envs * rollout_steps / batch_size)`。旧 `--replay-capacity`、`--replay-recent-sample-fraction`、`--updates-per-iteration`、`--save-replay` 已移除。
 
-Direct action 需要从头训练：旧 residual Teacher、旧弧度 Student、旧 replay 和导出包均被契约校验拒绝，即使观测/动作维数相同。Teacher 归档必须保留 `params/policy_contract.json`；新 Student checkpoint 内嵌契约，导出包使用 deployment v4 和 `joint_action` 输出。DAgger 日志增加每关节目标 MAE、Student/Teacher 目标逐步变化 RMS、目标变化差、失败回合比例与回合步数；动作变化指标排除跨 reset 的跳变，均以 rad 为单位。
+Student 仍保留初态随机化、传感器噪声、质量/PD/摩擦 DR 和 Push；这些范围没有因更换算法而全部关闭。噪声在前 20% 训练内升到全强度，物理 DR 在 5%–25% 扩展，Push 在 10%–35% 扩展；RSI 初始概率 0.3，前 15% 训练内退出，是否启用仍按技能配置。可选动作延迟课程在显式开启后使用 10%–30% 时间段。`--max-iterations` 和实际 rollout 长度控制这些时间点，恢复训练接续已完成轮数。
+
+训练增加 **按技能的 termination curriculum**：root/dof/interaction tracking 阈值按各技能的归一化存活比例调整，初始放宽到原阈值的 1.5 倍，范围 1–2 倍。每个 episode 的计划时长由 reset 后剩余 reference 时长加该次实际采样的 end hold 计算，阈值倍数在该 episode 内固定；完成和失败信息在自动 reset 前保存。每轮最多更新一次，样本不足时保持。fall、机械限位和 non-finite 判据不放宽。课程参数集中在 `student_termination`；这些是待实验验证的初始参数，不代表已验证的成功率目标。`StudentTermination/<skill>/...` 记录归一化存活、完成率、失败原因及实际阈值。评估关闭该课程并恢复原始阈值。
+
+新训练目录为 `logs/rsl_rl/g1_shoot_student_ppo_bc_v1`，checkpoint 顶层格式为 `bb_mimic_nt_student_ppo_bc_v1`，包含 actor/critic、两份独立 Adam 状态及学习率、已完成迭代数、Teacher SHA256、部署 metadata 和 termination curriculum 状态。`--resume-checkpoint` 接受同一 Teacher、兼容观测接口的 PPO+BC checkpoint，包括此前使用共同 Adam 的版本：恢复时按参数拆分旧 Adam 状态，保留各参数的动量和更新步数，并让两侧接续已保存的学习率，不重置为配置初值。正在运行的训练进程不会热更新，使用独立优化器需重启训练或从 checkpoint 恢复。
+
+旧纯 DAgger checkpoint 不能恢复为 PPO+BC 训练，需要重新开始；旧 direct-action Student checkpoint/导出包仍可播放、评估和重导出，其历史维度按归档配置读取。旧 residual action 模型仍不兼容。
 
 ```bash
 python scripts/rsl_rl/play_student.py \
-  --student-weights logs/rsl_rl/g1_shoot_student_dagger_v4/<run>/exported/student_weights.pt \
-  --clip-id 0
-
-python scripts/rsl_rl/play_student.py \
-  --student-weights logs/rsl_rl/g1_shoot_student_dagger_v4/<run>/model_400.pt \
-  --clip-id 0
-
-python scripts/rsl_rl/play_student.py \
-  --student-weights /path/to/student_weights.pt --all-clips
-
-# 仅播放 shoot，--clip-id 为该技能内索引，逗号/句号在该技能内切换
-python scripts/rsl_rl/play_student.py \
-  --student-weights /path/to/student_weights.pt --skill shoot --clip-id 0
-
-# 同时播放单个技能的全部 clips；可替换为 hold 或 stand_to_hold
-python scripts/rsl_rl/play_student.py \
-  --student-weights /path/to/student_weights.pt --skill shoot --all-clips
-
-python scripts/rsl_rl/evaluate_student.py \
-  --teacher-checkpoint /path/to/teacher_model.pt \
-  --student-weights /path/to/student_weights.pt --headless
+  --student-weights logs/rsl_rl/g1_shoot_student_ppo_bc_v1/<run>/model_400.pt \
+  --skill shoot --all-clips
 
 python scripts/rsl_rl/export_student.py \
-  --checkpoint /path/to/model_250.pt \
+  --checkpoint logs/rsl_rl/g1_shoot_student_ppo_bc_v1/<run>/model_400.pt \
   --output outputs/student_export
 ```
 
-交互播放支持 `V` reference 点、`,` / `.` 切换 clip、`P` 或空格暂停/恢复、`R` 重启、`--skill`、`--all-clips`、`--ignore-failures` 和 `--no-timeout`。技能选择与 Teacher 一致：`--skill hold|shoot|stand_to_hold` 将播放和按键切换限制在该技能内，`--clip-id` 使用技能内索引；不指定技能时使用全局索引。普通多环境模式所有 env 使用同一 clip；`--skill <name> --all-clips` 按该技能 clip 数创建 env 并一一对应，单独 `--all-clips` 则播放全部技能的所有 clips。日志显示技能名、command ID 与全局 clip ID。
+交互播放支持 `V` reference 点、`,` / `.` 切换 clip、`P` 或空格暂停/恢复、`R` 重启、`--skill`、`--all-clips`、`--ignore-failures` 和 `--no-timeout`。选择技能后 `--clip-id` 是技能内索引，否则是全局索引。普通模式所有 env 使用同一 clip；`--all-clips` 为每个选中 clip 创建一个 env。播放默认关闭初态扰动和域随机化、RSI、观测噪声和人工延迟；`--random-init` 和 `--domain-randomization` 可独立开启对应扰动。
 
-部署交付只需 `student_config.json` 与 `student_policy.onnx`；配置无版本标记，记录 ONNX 输入输出、观测顺序/缩放、关节顺序、nominal pose、安全限位、PD 参数、固定标称延迟和 `export_source`。多技能通过 `skills.command` 定义 one-hot 编码，通过 `skills.definitions` 明确技能名、command ID、可选 motion profiles、初始化及 end 规则；每个 profile 包含篮筐初始柱坐标，切换技能需要重新初始化并重置历史。训练采样权重和 RSI 不进入部署配置。导出目录还保留 `student_weights.pt`、TorchScript、校验向量和 manifest，用于本项目重放与验收。成对评估对相同 clip 分别运行 Teacher 与 Student，输出篮球首次触地相对篮筐的水平落点和最高高度。
+### Student 成对评估
 
-Student Play 默认关闭全部初态扰动和域随机化，同一 clip 每次从参考初始状态重启。需要测试扰动时，在 `play_student.py` 命令中添加 `--random-init`（开启训练配置中的全部 HumanX 初态随机化）或 `--domain-randomization`（开启完整强度的物理参数随机化、动作延迟采样、三类外力和独立速度 Push），两者可独立使用或同时开启。观测噪声仍关闭，观测延迟仍使用导出配置的固定值；RSI 和随机 clip 仍关闭。
+原来的飞行评估保持为默认 `--mode flight`，在关闭提前终止的情况下记录同一 clip 的球最高高度和首次触地相对篮筐落点；这类指标不表示机器人闭环存活能力：
 
-Student 真机导出流程、技能 command/初始化契约和参考观测构造器见 [部署说明](docs/student_deployment.md)。
+```bash
+python scripts/rsl_rl/evaluate_student.py \
+  --teacher-checkpoint /path/to/teacher_model.pt \
+  --student-weights /path/to/student_weights.pt --headless
+```
+
+闭环模式必须显式选择技能，对 Teacher 与 Student 使用同一组 clips、原始终止阈值、确定性均值动作、无 DR/RSI/初态噪声。每个 episode 强制固定的末帧保持时间，默认 5 秒，可用 `--end-hold-s` 改变；两种策略的 end trigger 都固定为 1。只统计各环境第一个 episode，不把提前失败后自动重开的回合混入结果。
+
+```bash
+python scripts/rsl_rl/evaluate_student.py \
+  --mode closed-loop --skill shoot --end-hold-s 5 \
+  --teacher-checkpoint /path/to/teacher_model.pt \
+  --student-weights /path/to/student_weights.pt \
+  --output outputs/student_closed_loop_shoot.json --headless
+```
+
+可分别运行 `--skill hold` 和 `--skill stand_to_hold`。`summary.teacher/student` 包含 `completion_fraction`、`failure_fraction`、`mean_survival_fraction`、实际时长和每个终止原因计数；`clips` 保存配对明细。同一步同时出现 reference_finished 和失败时按失败计。归一化存活比例按每个 episode 的计划时长计算，成功完成置为 1；它与完整完成率不同。课程快照在自动 reset 前保存，评估随后立即复制，防止下一个 episode 覆盖。
+
+真机交付只需同次导出的 `student_config.json` 与 `student_policy.onnx`。配置记录观测布局/缩放、关节顺序、nominal、PD 参数、技能命令和单一 initial_pose，不带参考轨迹。运行时技能切换和篮筐参数更新保留连续历史。详细接口、兼容性和验证方法见 [部署说明](docs/student_deployment.md)。
 
 ### 从 Teacher rollout 导出训练 motion
 

@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_LOGS = PROJECT_ROOT / 'logs/rsl_rl/g1_shoot_student_dagger_v4'
+DEFAULT_LOGS = PROJECT_ROOT / 'logs/rsl_rl/g1_shoot_student_ppo_bc_v1'
 
 
 def latest_student_checkpoint(logs_dir: Path) -> Path:
@@ -52,7 +52,9 @@ def main():
     if args.student_config and not args.student_weights:
         parser.error('--student-config applies only to --student-weights')
     import torch
-    from bb_mimic_nt.student_runtime import student_export, student_load_policy, student_policy_from_state
+    from bb_mimic_nt.student_runtime import (
+        STUDENT_CHECKPOINT_FORMATS, student_export, student_load_policy, student_policy_from_state,
+    )
 
     source_iteration = None
     if args.student_weights:
@@ -62,10 +64,10 @@ def main():
         selected = args.checkpoint or latest_student_checkpoint(args.logs_dir)
         print(f'Selected Student checkpoint: {selected.resolve()}', flush=True)
         payload = torch.load(selected, map_location='cpu', weights_only=False)
-        if payload.get('format') != 'bb_mimic_nt_student_dagger_v1' or 'metadata' not in payload:
-            raise ValueError(f'Checkpoint is not an exportable Student DAgger checkpoint: {selected}')
+        if payload.get('format') not in STUDENT_CHECKPOINT_FORMATS or 'metadata' not in payload:
+            raise ValueError(f'Checkpoint is not an exportable Student checkpoint: {selected}')
         metadata = dict(payload['metadata'])
-        source_iteration = payload['iteration']
+        source_iteration = payload.get('next_iteration', payload.get('iteration'))
         policy = student_policy_from_state(payload['student'], metadata, 'cpu')
     destination = export_destination(selected, args.output)
     initial_pose = json.loads(args.initial_pose.read_text()) if args.initial_pose else None

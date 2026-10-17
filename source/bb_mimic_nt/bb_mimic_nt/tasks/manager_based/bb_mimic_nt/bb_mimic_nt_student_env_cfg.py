@@ -1,9 +1,10 @@
-"""Independent Student DAgger environment and deterministic playback configuration."""
+"""Student PPO with Teacher supervision and deterministic playback configuration."""
 
 from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
+from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
 
@@ -17,6 +18,7 @@ from bb_mimic_nt.training import NUM_ENVS
 from . import mdp
 from .bb_mimic_nt_env_cfg import (
     ActionsCfg, DomainRandomizationCfg, DRPhysicsScheduleCfg, G1ShootEnvCfg, G1ShootSceneCfg, ObservationsCfg,
+    RewardsCfg, TerminationsCfg,
 )
 
 
@@ -28,6 +30,7 @@ class StudentPhysicsScheduleCfg(DRPhysicsScheduleCfg):
 
 @configclass
 class StudentLatencyScheduleCfg(DRPhysicsScheduleCfg):
+    enabled: bool = False
     start_fraction: float = 0.10
     end_fraction: float = 0.30
 
@@ -68,15 +71,15 @@ class StudentObservationScalesCfg:
 @configclass
 class StudentObservationSettingsCfg:
     history_length: int = STUDENT_HISTORY_LENGTH
-    delay_nominal_steps: int = 1
+    delay_nominal_steps: int = 0
     delay_min_steps: int = 0
     delay_max_steps: int = 3
-    # Ramp sensor noise and delay spread before Student takes full control.
+    # Sensor noise keeps its existing curriculum; artificial latency is off.
     enabled: bool = True
     start_fraction: float = 0.0
     end_fraction: float = 0.20
     full_strength: bool = False
-    randomize_delay: bool = True
+    randomize_delay: bool = False
     enable_noise: bool = True
     noise_strength: float = 1.0
     gravity_noise_std: float = 0.015
@@ -110,7 +113,8 @@ class StudentObservationsCfg:
 
 
 @configclass
-class StudentRewardsCfg:
+class StudentRewardsCfg(RewardsCfg):
+    # This term returns zero; a nonzero weight keeps its statistics running.
     ball_flight_metrics = RewTerm(func=mdp.StudentBallFlightMetrics, weight=1.0)
 
 
@@ -120,12 +124,37 @@ class StudentCurriculumCfg:
 
 
 @configclass
+class StudentTerminationSettingsCfg:
+    enabled: bool = True
+    initial_scale: float = 1.5
+    minimum_scale: float = 1.0
+    maximum_scale: float = 2.0
+    minimum_episodes: int = 256
+    ema_episodes: float = 2048.0
+    relax_below: float = 0.5
+    tighten_above: float = 0.8
+    relax_factor: float = 1.01
+    tighten_factor: float = 0.99
+
+
+@configclass
+class StudentTerminationsCfg(TerminationsCfg):
+    root_tracking_error = DoneTerm(func=mdp.student_root_tracking_error, params={"maximum_error": 1.0})
+    dof_tracking_error = DoneTerm(func=mdp.student_reference_dof_error, params={"maximum_rmse": 1.0})
+    interaction_tracking_error = DoneTerm(
+        func=mdp.student_interaction_tracking_error, params={"maximum_distance": 0.35},
+    )
+
+
+@configclass
 class G1ShootStudentEnvCfg(G1ShootEnvCfg):
     scene: StudentSceneCfg = StudentSceneCfg(num_envs=NUM_ENVS, env_spacing=7.0)
     observations: StudentObservationsCfg = StudentObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     rewards: StudentRewardsCfg = StudentRewardsCfg()
     curriculum: StudentCurriculumCfg = StudentCurriculumCfg()
+    terminations: StudentTerminationsCfg = StudentTerminationsCfg()
+    student_termination: StudentTerminationSettingsCfg = StudentTerminationSettingsCfg()
     student_observation: StudentObservationSettingsCfg = StudentObservationSettingsCfg()
     dr: StudentDomainRandomizationCfg = StudentDomainRandomizationCfg()
 
@@ -149,6 +178,7 @@ class G1ShootStudentPlayEnvCfg(G1ShootStudentEnvCfg):
             self.dr.init_state.enabled = False
         self.student_observation.enable_noise = False
         self.student_observation.randomize_delay = False
+        self.student_termination.enabled = False
         for name in ("delay", "ball_mass", "pd_gains", "hand_friction", "foot_friction", "link_mass",
                      "push", "global_push", "object_push", "velocity_push"):
             getattr(self.dr, name).enabled = False

@@ -17,3 +17,4 @@ from .rewards import *  # noqa: F401, F403
 from .student_metrics import *  # noqa: F401, F403
 from .student_observations import *  # noqa: F401, F403
 from .terminations import *  # noqa: F401, F403
+from .student_terminations import *  # noqa: F401, F403
